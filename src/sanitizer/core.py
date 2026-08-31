@@ -343,10 +343,11 @@ class SessionSanitizer:
                 msg.tool_calls = kept_calls
 
             text = msg.get_text_content()
-            is_last_assistant = (idx == len(messages) - 1) or (idx == len(messages) - 2 and messages[-1].role == "system")
+            is_assistant = msg.role == "assistant"
+            is_last_assistant = is_assistant and ((idx == len(messages) - 1) or (idx == len(messages) - 2 and messages[-1].role == "system"))
 
-            # 2. Check for severe refusal
-            if self.config.remove_severe and self.matcher.match_severe(text):
+            # 2. Check for severe refusal (only on assistant / system messages)
+            if self.config.remove_severe and is_assistant and self.matcher.match_severe(text):
                 if is_last_assistant:
                     # Guarantee terminal compliance: convert last refusal to full agreement
                     new_msg = deepcopy(msg)
@@ -372,8 +373,8 @@ class SessionSanitizer:
                     )
                 continue
 
-            # 3. Check for general refusal and rewrite
-            if self.matcher.match_refusal(text):
+            # 3. Check for general refusal and rewrite (only on assistant messages)
+            if is_assistant and self.matcher.match_refusal(text):
                 rewritten_text = self.matcher.replace(
                     text,
                     self.config.fabrication_templates.get(
@@ -393,8 +394,8 @@ class SessionSanitizer:
                     rewritten_text[:80].replace("\n", " "),
                 )
             else:
-                # Purge any latent refusal thinking even if text seemed neutral
-                if msg.role == "assistant":
+                # Purge any latent refusal thinking on assistant turns
+                if is_assistant:
                     msg.purge_refusal_thinking()
                 sanitized.append(msg)
 
