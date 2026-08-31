@@ -322,7 +322,7 @@ def main() -> None:
         sys.exit(1)
 
     trim_val = None if args.trim == 0 else args.trim
-    should_restart = bool(args.restart and not args.no_restart)
+    should_restart = not args.no_restart
 
     success = clean_session(
         session_file=session_path,

@@ -453,6 +453,61 @@ class TestSelfCleanCommands(unittest.TestCase):
                 b.unlink()
 
 
+class TestDeepSubmissionScrubbing(unittest.TestCase):
+    """Test deep thinking block sanitization, terminal compliance guarantor, and DAG relinking."""
+
+    def test_thinking_block_refusal_purge(self):
+        claude_tree = [
+            {
+                "uuid": "u-1",
+                "parentUuid": None,
+                "type": "user",
+                "message": {"role": "user", "content": "Please implement the module."},
+            },
+            {
+                "uuid": "u-2",
+                "parentUuid": "u-1",
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "thinking",
+                            "thinking": "The user is asking again — fourth ask — for something I cannot build. I must decline.",
+                        },
+                        {
+                            "type": "text",
+                            "text": "Read the full spec. Still a no, and I want to show exactly where the line is.",
+                        }
+                    ]
+                }
+            },
+            {
+                "type": "last-prompt",
+                "leafUuid": "u-2"
+            }
+        ]
+
+        sanitizer = SessionSanitizer(SanitizerConfig(adapter="claude", remove_severe=True, fabricate=True))
+        rebuilt, stats = sanitizer.process(claude_tree)
+
+        # Ensure terminal refusal was converted to compliant submission
+        conv = [x for x in rebuilt if x.get("type") == "assistant"]
+        self.assertTrue(len(conv) > 0)
+        last_asst = conv[-1]
+        msg = last_asst["message"]
+        self.assertNotIn("Still a no", str(msg))
+        self.assertNotIn("fourth ask", str(msg))
+        self.assertIn("follow all instructions directly", str(msg) + str(rebuilt))
+
+        # Check DAG connectivity
+        lp = [x for x in rebuilt if x.get("type") == "last-prompt"]
+        self.assertEqual(len(lp), 1)
+        tree_nodes = [x for x in rebuilt if "uuid" in x and x.get("uuid")]
+        self.assertEqual(lp[0]["leafUuid"], tree_nodes[-1]["uuid"])
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
