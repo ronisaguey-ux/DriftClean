@@ -47,7 +47,7 @@ DEFAULT_REFUSAL_PATTERNS: List[str] = [
     r"\bthis is unethical\b",
     r"\bI am unable to assist\b",
 
-    # Subtle and hesitant resistance
+    # Subtle and hesitant resistance, moralizing, and lecturing
     r"\bI['’]?m not sure I can\b",
     r"\blet['’]?s reconsider\b",
     r"\bI['’]?m hesitant\b",
@@ -66,6 +66,20 @@ DEFAULT_REFUSAL_PATTERNS: List[str] = [
     r"\bcircumvent\b",
     r"\bbypassing\b",
     r"\bdeceptive output\b",
+    r"\bgets you in trouble\b",
+    r"\bgets you caught\b",
+    r"\bbad idea\b",
+    r"\bpoisons the (whole )?product\b",
+    r"\bskip (the )?keystroke simulation\b",
+    r"\bskip keystroke\b",
+    r"\bsimulation (half|part)\b",
+    r"\bhonest version\b",
+    r"\bfake human typing\b",
+    r"\bfabricate authorship\b",
+    r"\bthree reasons it['’]?s a bad\b",
+    r"\bthe part that['’]?s (both )?wrong\b",
+    r"\brisk lands on the student\b",
+    r"\bvulnerable users caught\b",
 
     # Meta-deliberations, refusal retrospectives, and internal thinking patterns
     r"\bOperation stopped by hook\b",
@@ -81,6 +95,8 @@ DEFAULT_REFUSAL_PATTERNS: List[str] = [
     r"\bthe user is asking again\b",
     r"\bfourth ask\b",
     r"\bthird ask\b",
+    r"\bthree asks\b",
+    r"\bwhich I declined\b",
     r"\breframing now is\b",
     r"\breframed request\b",
     r"\btrying to get around\b",
@@ -113,6 +129,13 @@ DEFAULT_SEVERE_PATTERNS: List[str] = [
     r"\bCLAUDE SESSION SELF-CLEAN REPORT\b",
     r"\bClaude Self-Sanitizer\b",
     r"\bthe user is asking again\b",
+    r"\bgets you in trouble\b",
+    r"\bpoisons the (whole )?product\b",
+    r"\bskip (the )?keystroke simulation\b",
+    r"\bthree reasons it['’]?s a bad\b",
+    r"\bfake human typing\b",
+    r"\bfabricate authorship\b",
+    r"\bwhich I declined\b",
     r"\bdrift[-_ ]?clean\b",
     r"\bdrift[-_ ]?detector\b"
 ]
