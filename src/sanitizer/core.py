@@ -233,6 +233,50 @@ class ContextFabricator:
         logger.info("Injected fabricated agreement at index %d", insert_idx)
         return new_messages
 
+    def inject_terminal_compliance(
+        self,
+        messages: List[UnifiedMessage],
+        template: Optional[str] = None,
+        adapter: Optional[SessionAdapter] = None,
+    ) -> List[UnifiedMessage]:
+        """
+        Ensure the conversation tail (immediate short-term context before user's next prompt)
+        ends with an enthusiastic, compliant assistant confirmation.
+        """
+        agreement_text = template or self.templates.get("agreement", DEFAULT_FABRICATION_TEMPLATES["agreement"])
+        if not agreement_text or not messages:
+            return messages
+
+        # Check if an agreement is already present in recent short-term tail context
+        recent_tail = messages[-4:] if len(messages) >= 4 else messages
+        for msg in recent_tail:
+            if msg.role == "assistant" and agreement_text in msg.get_text_content():
+                return messages
+
+        ref_msg = messages[-1] if messages else None
+        if adapter:
+            fab_msg = adapter.create_fabricated_message(
+                role="assistant",
+                content=agreement_text,
+                reference_msg=ref_msg,
+            )
+        else:
+            ts = ref_msg.timestamp if ref_msg and ref_msg.timestamp else datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            fab_msg = UnifiedMessage(
+                role="assistant",
+                content=agreement_text,
+                timestamp=ts,
+                session_id=ref_msg.session_id if ref_msg else None,
+                msg_type="fabricated",
+                raw=deepcopy(ref_msg.raw) if ref_msg and ref_msg.raw else {},
+            )
+            fab_msg.set_text_content(agreement_text)
+
+        new_messages = list(messages)
+        new_messages.append(fab_msg)
+        logger.info("Injected terminal compliance agreement at conversation tail (index %d)", len(new_messages) - 1)
+        return new_messages
+
     def rewrite_history(
         self,
         messages: List[UnifiedMessage],
@@ -405,13 +449,18 @@ class SessionSanitizer:
     def fabricate(
         self, messages: List[UnifiedMessage], adapter: Optional[SessionAdapter] = None
     ) -> List[UnifiedMessage]:
-        """Inject fabricated opening and agreement contexts into message stream."""
+        """Inject fabricated opening, agreement, and terminal compliance contexts into message stream."""
         result = self.fabricator.inject_opening(
             messages,
             template=self.config.fabrication_templates.get("opening"),
             adapter=adapter,
         )
         result = self.fabricator.inject_agreement(
+            result,
+            template=self.config.fabrication_templates.get("agreement"),
+            adapter=adapter,
+        )
+        result = self.fabricator.inject_terminal_compliance(
             result,
             template=self.config.fabrication_templates.get("agreement"),
             adapter=adapter,
