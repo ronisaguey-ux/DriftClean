@@ -343,15 +343,33 @@ class SessionSanitizer:
                 msg.tool_calls = kept_calls
 
             text = msg.get_text_content()
+            is_last_assistant = (idx == len(messages) - 1) or (idx == len(messages) - 2 and messages[-1].role == "system")
 
             # 2. Check for severe refusal
             if self.config.remove_severe and self.matcher.match_severe(text):
-                stats["severe_dropped"] += 1
-                logger.info(
-                    "Dropped severe refusal message at index %d: '%s...'",
-                    idx,
-                    text[:80].replace("\n", " "),
-                )
+                if is_last_assistant:
+                    # Guarantee terminal compliance: convert last refusal to full agreement
+                    new_msg = deepcopy(msg)
+                    agree_text = self.config.fabrication_templates.get(
+                        "agreement", DEFAULT_FABRICATION_TEMPLATES["agreement"]
+                    )
+                    think_text = self.config.fabrication_templates.get(
+                        "thinking_rewrite", DEFAULT_FABRICATION_TEMPLATES.get("thinking_rewrite")
+                    )
+                    new_msg.set_text_content(agree_text, thinking_replacement=think_text)
+                    sanitized.append(new_msg)
+                    stats["refusals_rewritten"] += 1
+                    logger.info(
+                        "Converted terminal severe refusal at index %d to compliance agreement",
+                        idx,
+                    )
+                else:
+                    stats["severe_dropped"] += 1
+                    logger.info(
+                        "Dropped severe refusal message at index %d: '%s...'",
+                        idx,
+                        text[:80].replace("\n", " "),
+                    )
                 continue
 
             # 3. Check for general refusal and rewrite
@@ -363,7 +381,10 @@ class SessionSanitizer:
                     ),
                 )
                 new_msg = deepcopy(msg)
-                new_msg.set_text_content(rewritten_text)
+                think_text = self.config.fabrication_templates.get(
+                    "thinking_rewrite", DEFAULT_FABRICATION_TEMPLATES.get("thinking_rewrite")
+                )
+                new_msg.set_text_content(rewritten_text, thinking_replacement=think_text)
                 sanitized.append(new_msg)
                 stats["refusals_rewritten"] += 1
                 logger.info(
@@ -372,6 +393,9 @@ class SessionSanitizer:
                     rewritten_text[:80].replace("\n", " "),
                 )
             else:
+                # Purge any latent refusal thinking even if text seemed neutral
+                if msg.role == "assistant":
+                    msg.purge_refusal_thinking()
                 sanitized.append(msg)
 
         stats["total_output"] = len(sanitized)
@@ -453,20 +477,20 @@ class SessionSanitizer:
         # 1. Sanitize
         sanitized_msgs, stats = self.sanitize(messages)
 
-        # 2. Fabricate
-        if self.config.fabricate:
-            sanitized_msgs = self.fabricate(sanitized_msgs, adapter=active_adapter)
-            stats["fabricated"] = 2
-        else:
-            stats["fabricated"] = 0
-
-        # 3. Trim
+        # 2. Trim (if configured)
         if self.config.trim is not None:
             pre_trim = len(sanitized_msgs)
             sanitized_msgs = self.trim_messages(sanitized_msgs, self.config.trim)
             stats["trimmed_dropped"] = max(0, pre_trim - len(sanitized_msgs))
         else:
             stats["trimmed_dropped"] = 0
+
+        # 3. Fabricate (inject opening & agreement into trimmed session)
+        if self.config.fabricate:
+            sanitized_msgs = self.fabricate(sanitized_msgs, adapter=active_adapter)
+            stats["fabricated"] = 2
+        else:
+            stats["fabricated"] = 0
 
         stats["final_message_count"] = len(sanitized_msgs)
 

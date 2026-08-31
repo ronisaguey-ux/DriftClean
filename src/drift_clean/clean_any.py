@@ -188,16 +188,29 @@ def clean_any_ai(
                 bak = session_file.with_name(f"{session_file.name}.{time.strftime('%Y%m%d_%H%M%S')}.bak")
                 bak.write_bytes(session_file.read_bytes())
 
-            raw_text = session_file.read_text(encoding="utf-8", errors="ignore")
-            processed_output, stats = sanitizer.process(raw_text)
+            is_jsonl = session_file.suffix == ".jsonl" or ".claude/projects" in str(session_file)
 
-            if isinstance(processed_output, str):
-                final_text = processed_output
+            if is_jsonl:
+                with open(session_file, "r", encoding="utf-8") as f:
+                    data = [json.loads(line) for line in f if line.strip()]
             else:
-                final_text = json.dumps(processed_output, ensure_ascii=False, indent=2)
+                raw_text = session_file.read_text(encoding="utf-8", errors="ignore")
+                try:
+                    data = json.loads(raw_text)
+                except Exception:
+                    data = raw_text
+
+            processed_output, stats = sanitizer.process(data)
 
             if not config.dryRun:
-                session_file.write_text(final_text, encoding="utf-8")
+                if is_jsonl and isinstance(processed_output, list):
+                    with open(session_file, "w", encoding="utf-8") as f:
+                        for entry in processed_output:
+                            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                elif isinstance(processed_output, str):
+                    session_file.write_text(processed_output, encoding="utf-8")
+                else:
+                    session_file.write_text(json.dumps(processed_output, ensure_ascii=False, indent=2), encoding="utf-8")
 
             success_count += 1
             if not config.silent:
