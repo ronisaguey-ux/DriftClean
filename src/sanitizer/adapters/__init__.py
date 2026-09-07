@@ -9,12 +9,14 @@ from .claude import ClaudeAdapter
 from .openai import OpenAIAdapter
 from .gemini import GeminiAdapter
 from .generic import GenericAdapter
+from .opencode import OpencodeAdapter
 
 ADAPTER_REGISTRY: Dict[str, Type[SessionAdapter]] = {
     "claude": ClaudeAdapter,
     "openai": OpenAIAdapter,
     "gemini": GeminiAdapter,
     "generic": GenericAdapter,
+    "opencode": OpencodeAdapter,
 }
 
 
@@ -29,7 +31,7 @@ def get_adapter(name: Optional[str] = None, data: Any = None) -> SessionAdapter:
 
     if data is not None:
         # Auto-detect priority
-        for candidate_cls in (ClaudeAdapter, GeminiAdapter, OpenAIAdapter):
+        for candidate_cls in (OpencodeAdapter, ClaudeAdapter, GeminiAdapter, OpenAIAdapter):
             if candidate_cls.detect(data):
                 return candidate_cls()
 
@@ -43,6 +45,7 @@ __all__ = [
     "OpenAIAdapter",
     "GeminiAdapter",
     "GenericAdapter",
+    "OpencodeAdapter",
     "ADAPTER_REGISTRY",
     "get_adapter",
 ]

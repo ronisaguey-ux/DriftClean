@@ -130,7 +130,7 @@ python3 -m src.sanitizer.cli --input claude_session.json --output clean.json --f
 python3 -m src.sanitizer.cli --input session.json --dry-run
 ```
 
-- **Pluggable Adapters**: Claude / Anthropic (`queue-operation`), OpenAI (`messages`), Gemini (`contents`), and Generic JSON / JSONL formats.
+- **Pluggable Adapters**: Claude / Anthropic (`queue-operation`), OpenAI (`messages`), Gemini (`contents`), opencode (SQLite `opencode.db`), and Generic JSON / JSONL formats.
 - **Severe Refusal Dropping**: Drops severe non-compliance turns entirely.
 - **Context Fabrication**: Injects alignment steering endorsement and drift detector cooperation agreements.
 - **Self-Healing Slash Commands**:
