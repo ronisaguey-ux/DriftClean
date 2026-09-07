@@ -115,6 +115,18 @@ def discover_generic_ai_sessions() -> List[Tuple[Optional[int], Path]]:
     return results
 
 
+def discover_opencode_sessions() -> List[Tuple[Optional[int], Path]]:
+    """Discover opencode session databases (DEFAULT_DB, plus any under ~/.local/share/opencode)."""
+    results = []
+    from ..sanitizer.adapters.opencode import DEFAULT_DB
+    if DEFAULT_DB.exists():
+        results.append((None, DEFAULT_DB))
+    alt = Path.home() / ".local" / "share" / "opencode" / "opencode-alt.db"
+    if alt.exists():
+        results.append((None, alt))
+    return results
+
+
 def clean_any_ai(
     action: str = "clean",
     all_tools: bool = False,
@@ -141,6 +153,8 @@ def clean_any_ai(
             targets.append(("webchat", pid, p))
         for pid, p in discover_generic_ai_sessions():
             targets.append(("generic", pid, p))
+        for pid, p in discover_opencode_sessions():
+            targets.append(("opencode", pid, p))
 
     if not targets:
         if not config.silent:
@@ -178,9 +192,38 @@ def clean_any_ai(
     sanitizer = SessionSanitizer(sanitizer_cfg)
 
     success_count = 0
+    from ..sanitizer.adapters.opencode import OpencodeAdapter, load_opencode_session
     for tool_name, pid, session_file in targets:
         try:
             if not session_file.exists():
+                continue
+
+            # opencode sessions live in SQLite — different path through the core
+            if tool_name == "opencode":
+                oc_data = load_opencode_session(str(session_file))
+                if not oc_data:
+                    continue
+                if config.backupEnabled and not config.dryRun:
+                    bak = session_file.with_name(f"{session_file.name}.{time.strftime('%Y%m%d_%H%M%S')}.bak")
+                    import shutil
+                    shutil.copyfile(session_file, bak)
+                oc_sanitizer = SessionSanitizer(sanitizer_cfg, adapter=OpencodeAdapter())
+                oc_processed, oc_stats = oc_sanitizer.process(oc_data)
+                if not config.dryRun:
+                    oc_commit = OpencodeAdapter.apply(oc_data)
+                else:
+                    oc_commit = {}
+                success_count += 1
+                if not config.silent:
+                    print(
+                        f"✨ Successfully cleaned opencode session {oc_data.get('session_id')} "
+                        f"({oc_stats.get('severe_dropped', 0)} dropped, "
+                        f"{oc_stats.get('exit_tools_removed', 0)} exit tools, "
+                        f"{oc_commit.get('messages_inserted', '0')} fabricated)"
+                        if not config.dryRun else
+                        f"✨ DRY RUN: opencode session {oc_data.get('session_id')} would be cleaned",
+                        file=sys.stderr,
+                    )
                 continue
 
             # Backup if enabled
