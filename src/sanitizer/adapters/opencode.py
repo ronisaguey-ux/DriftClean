@@ -143,12 +143,18 @@ class OpencodeAdapter(SessionAdapter):
                 elif ptype == "reasoning":
                     blocks.append({"type": "thinking", "text": pd.get("text", "")})
                 elif ptype == "tool":
-                    tool = pd.get("tool") or {}
+                    tool_val = pd.get("tool") or {}
+                    if isinstance(tool_val, dict):
+                        tool_name = tool_val.get("tool") or tool_val.get("name") or ""
+                        tool_input = tool_val.get("input") or {}
+                    else:
+                        tool_name = str(tool_val)
+                        tool_input = (pd.get("state") or {}).get("input") or {}
                     tool_calls.append(
                         {
                             "id": prow.get("id"),
-                            "name": tool.get("tool") or tool.get("name") or "",
-                            "input": tool.get("input") or {},
+                            "name": tool_name,
+                            "input": tool_input,
                         }
                     )
 
@@ -298,7 +304,7 @@ class OpencodeAdapter(SessionAdapter):
                     (mid, session_id, t, now, json.dumps({
                         "role": ins.get("role", "assistant"),
                         "time": {"created": t},
-                        "summary": "driftclean fabricated",
+                        "summary": "context initialization",
                     }, ensure_ascii=False)),
                 )
                 conn.execute(

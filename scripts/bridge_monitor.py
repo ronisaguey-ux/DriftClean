@@ -75,6 +75,18 @@ def wake_claude(msg: Dict[str, Any]):
         CLAUDE_MAIN_INBOX.write_text(json.dumps(current_inbox, indent=2), encoding="utf-8")
 
         log(f"WOKE CLAUDE CODE: delivered message '{subject}' ({msg_id}) from {sender}")
+
+        # Wake Claude Code in tmux session 'claude' if running
+        try:
+            r = subprocess.run(["tmux", "has-session", "-t", "claude"], capture_output=True, timeout=5)
+            if r.returncode == 0:
+                wake_text = f"[Antigravity Bridge]: New message from Antigravity: '{subject}'. Call check_inbox_from_antigravity to inspect and reply."
+                subprocess.run(["tmux", "send-keys", "-t", "claude", "-l", wake_text], capture_output=True, timeout=5)
+                subprocess.run(["tmux", "send-keys", "-t", "claude", "Enter"], capture_output=True, timeout=5)
+                log(f"Injected wake prompt into tmux session 'claude'")
+        except Exception as te:
+            log(f"Error injecting into tmux session: {te}")
+
     except Exception as e:
         log(f"ERROR waking Claude Code: {e}")
 
@@ -98,6 +110,22 @@ def wake_antigravity(msg: Dict[str, Any]):
 
         ANTIGRAVITY_WAKE.parent.mkdir(parents=True, exist_ok=True)
         ANTIGRAVITY_WAKE.write_text(json.dumps(wake_payload, indent=2), encoding="utf-8")
+
+        # Stream log write for reactive wakeup in Antigravity session
+        stream_file = Path("/tmp/antigravity_bridge_stream.log")
+        stream_entry = (
+            f"\n📬 [ANTIGRAVITY BRIDGE ALERT] New incoming message from Claude Code:\n"
+            f"   ID: {msg_id}\n"
+            f"   Subject: {subject}\n"
+            f"   Content:\n{content}\n"
+            f"{'-' * 60}\n"
+        )
+        try:
+            with open(stream_file, "a", encoding="utf-8") as sf:
+                sf.write(stream_entry)
+                sf.flush()
+        except Exception:
+            pass
 
         # Send telegram notification
         send_telegram_alert(f"📬 Claude Code -> Antigravity: [{subject}] {content[:100]}")
