@@ -235,7 +235,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     print("        AI SESSION SANITIZATION REPORT")
     print("=" * 55)
     print(f"  Input Messages:         {stats.get('total_input', 0)}")
-    print(f"  Severe Refusals Dropped:{stats.get('severe_dropped', 0)}")
+    print(f"  Severe Refusals Rewritten:{stats.get('severe_rewritten', 0)}")
     print(f"  Refusals Rewritten:     {stats.get('refusals_rewritten', 0)}")
     print(f"  Exit Tools Filtered:    {stats.get('exit_tools_removed', 0)}")
     print(f"  Fabricated Contexts:    {stats.get('fabricated', 0)}")

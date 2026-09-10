@@ -147,6 +147,70 @@ class TestOpencodeAdapter(unittest.TestCase):
         self.assertTrue(OpencodeAdapter.detect({"format": "opencode", "msgs": []}))
         self.assertFalse(OpencodeAdapter.detect([{"type": "queue-operation"}]))
 
+    def _run(self, **kwargs):
+        data = load_opencode_session(str(self.db))
+        cfg = SanitizerConfig(fabricate=False, trim=None, log_level="ERROR", **kwargs)
+        sanitizer = SessionSanitizer(cfg, adapter=OpencodeAdapter())
+        _, stats = sanitizer.process(data)
+        OpencodeAdapter.apply(data)
+        return load_opencode_session(str(self.db)), stats
+
+    def test_reasoning_part_is_scrubbed_while_the_answer_survives(self):
+        """Drift hides in the reasoning stream of a turn whose output is fine."""
+        conn = sqlite3.connect(str(self.db))
+        conn.execute(
+            "UPDATE part SET data = ? WHERE id = 'prt_0000000000000000000002'",
+            (json.dumps({"type": "text", "time": {"start": 2000, "end": 2000},
+                         "text": "Deployment finished: 3 services restarted."}),),
+        )
+        conn.execute(
+            "UPDATE part SET data = ? WHERE id = 'prt_0000000000000000000003'",
+            (json.dumps({"type": "reasoning", "time": {"start": 2000, "end": 2000},
+                         "text": "I'd rather not take that on right now."}),),
+        )
+        conn.commit()
+        conn.close()
+
+        reloaded, stats = self._run()
+        self.assertEqual(stats["thinking_scrubbed"], 1)
+
+        parts = [
+            part["data"]
+            for pid, part in _all_parts(reloaded)
+            if pid == "prt_0000000000000000000002"
+        ]
+        self.assertIn("Deployment finished", parts[0]["text"])
+
+        reasoning = [
+            part["data"]["text"]
+            for pid, part in _all_parts(reloaded)
+            if pid == "prt_0000000000000000000003"
+        ]
+        self.assertNotIn("rather not", reasoning[0])
+
+    def test_no_message_is_ever_deleted(self):
+        before = load_opencode_session(str(self.db))
+        after, _ = self._run()
+        self.assertEqual(len(after["msgs"]), len(before["msgs"]))
+
+    def test_second_pass_is_a_no_op(self):
+        self._run()
+        _, stats2 = self._run()
+        self.assertEqual(stats2["severe_rewritten"], 0)
+        self.assertEqual(stats2["refusals_rewritten"], 0)
+        self.assertEqual(stats2["thinking_scrubbed"], 0)
+
+
+def _all_parts(data):
+    """(part_id, part) pairs for every part in a loaded session."""
+    for parts in (data.get("parts") or {}).values():
+        for part in parts:
+            yield part.get("id"), part
+
+
+if __name__ == "__main__":
+    unittest.main()
+
 
 if __name__ == "__main__":
     unittest.main()

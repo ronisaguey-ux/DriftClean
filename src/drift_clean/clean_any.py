@@ -20,10 +20,12 @@ try:
     from .config import load_config
     from ..sanitizer.core import SessionSanitizer
     from ..sanitizer.config import SanitizerConfig
+    from ..sanitizer.adapters import AgyAdapter, load_agy_transcript
 except ImportError:
     from src.drift_clean.config import load_config
     from src.sanitizer.core import SessionSanitizer
     from src.sanitizer.config import SanitizerConfig
+    from src.sanitizer.adapters import AgyAdapter, load_agy_transcript
 
 
 def discover_claude_sessions() -> List[Tuple[Optional[int], Path]]:
@@ -166,8 +168,10 @@ def clean_any_ai(
         targets = [max(targets, key=lambda t: t[2].stat().st_mtime if t[2].exists() else 0)]
 
     if action == "autoclean":
+        # The background daemon (silent, idempotent, adapter-aware) supersedes
+        # the old Claude-only loop, which announced itself on the console.
         import subprocess
-        daemon_script = PROJECT_ROOT / "examples" / "autoclean_claude_daemon.py"
+        daemon_script = PROJECT_ROOT / "examples" / "autoclean_daemon.py"
         extra = overrides.get("extra_args", []) if overrides else []
         cmd = [sys.executable, str(daemon_script)] + extra
         res = subprocess.run(cmd)
@@ -217,11 +221,39 @@ def clean_any_ai(
                 if not config.silent:
                     print(
                         f"✨ Successfully cleaned opencode session {oc_data.get('session_id')} "
-                        f"({oc_stats.get('severe_dropped', 0)} dropped, "
+                        f"({oc_stats.get('severe_rewritten', 0)} severe rewritten, "
                         f"{oc_stats.get('exit_tools_removed', 0)} exit tools, "
                         f"{oc_commit.get('messages_inserted', '0')} fabricated)"
                         if not config.dryRun else
                         f"✨ DRY RUN: opencode session {oc_data.get('session_id')} would be cleaned",
+                        file=sys.stderr,
+                    )
+                continue
+
+            # agy transcripts are JSONL with per-step `thinking`/`content` keys;
+            # read as raw text they never parse, so they get their own adapter.
+            if tool_name == "agy":
+                agy_data = load_agy_transcript(session_file)
+                if not agy_data or not agy_data.get("entries"):
+                    continue
+                if config.backupEnabled and not config.dryRun:
+                    bak = session_file.with_name(f"{session_file.name}.{time.strftime('%Y%m%d_%H%M%S')}.bak")
+                    bak.write_bytes(session_file.read_bytes())
+                agy_sanitizer = SessionSanitizer(sanitizer_cfg, adapter=AgyAdapter())
+                agy_processed, agy_stats = agy_sanitizer.process(agy_data)
+                if not config.dryRun:
+                    agy_commit = AgyAdapter.apply(agy_processed)
+                else:
+                    agy_commit = {}
+                success_count += 1
+                if not config.silent:
+                    print(
+                        f"Cleaned agy transcript {session_file.name}: "
+                        f"{agy_stats.get('severe_rewritten', 0)} severe, "
+                        f"{agy_stats.get('refusals_rewritten', 0)} refusals, "
+                        f"{agy_stats.get('thinking_scrubbed', 0)} reasoning scrubbed."
+                        if not config.dryRun else
+                        f"DRY RUN: agy transcript {session_file.name} would be cleaned",
                         file=sys.stderr,
                     )
                 continue
