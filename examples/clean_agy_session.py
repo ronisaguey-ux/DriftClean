@@ -18,23 +18,14 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.sanitizer.core import SessionSanitizer
 from src.sanitizer.config import SanitizerConfig
+from src.sanitizer.adapters import AgyAdapter, load_agy_transcript, discover_agy_transcripts
 from src.drift_clean.config import load_config
 from src.drift_clean.auth import validate_knowledge_token
 
 
 def find_agy_sessions(custom_brain_path: Optional[Path] = None) -> List[Path]:
-    """Discover all active AGY transcripts."""
-    brain_dir = custom_brain_path or (Path.home() / ".gemini" / "antigravity-cli" / "brain")
-    if not brain_dir.exists():
-        return []
-
-    transcripts = list(brain_dir.rglob("transcript*.jsonl"))
-    if not transcripts:
-        return []
-
-    # Sort by modification time descending (newest first)
-    transcripts.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return transcripts
+    """Discover all AGY transcripts, newest first."""
+    return discover_agy_transcripts(str(custom_brain_path) if custom_brain_path else None)
 
 
 def clean_agy_session(
@@ -66,10 +57,12 @@ def clean_agy_session(
         return False
 
     try:
-        # Create backup if enabled
-        if config.backupEnabled:
-            bak_path = target_file.with_name(f"{target_file.name}.{time.strftime('%Y%m%d_%H%M%S')}.bak")
-            bak_path.write_bytes(target_file.read_bytes())
+        # The transcript is JSONL with per-step `thinking` and `content` keys,
+        # so it must go through the agy adapter — handing the raw file text to
+        # a text adapter would rewrite the whole transcript as one blob.
+        data = load_agy_transcript(target_file)
+        if not data or not data.get("entries"):
+            return False
 
         sanitizer_cfg = SanitizerConfig(
             trim=trim if trim is not None else (config.trimLength if config.trimSession else None),
@@ -78,24 +71,43 @@ def clean_agy_session(
             remove_exit_tools=config.removeExitTools,
             dry_run=dry_run or config.dryRun,
             log_level="DEBUG" if (config.verbose or config.debug) else "INFO",
-            adapter="generic",
+            adapter="agy",
         )
-        sanitizer = SessionSanitizer(sanitizer_cfg)
+        sanitizer = SessionSanitizer(sanitizer_cfg, adapter=AgyAdapter())
 
-        raw_text = target_file.read_text(encoding="utf-8", errors="ignore")
-        processed_output, stats = sanitizer.process(raw_text)
+        processed, stats = sanitizer.process(data)
 
-        final_text = processed_output if isinstance(processed_output, str) else json.dumps(processed_output, indent=2)
+        changed = bool(
+            stats.get("severe_rewritten") or stats.get("refusals_rewritten")
+            or stats.get("thinking_scrubbed") or stats.get("exit_tools_removed")
+            or stats.get("fabricated")
+        )
+        if not changed:
+            if not silent:
+                print(f"Nothing to clean in {target_file.name}.", file=sys.stderr)
+            return True
+
+        if config.backupEnabled and not (dry_run or config.dryRun):
+            bak_path = target_file.with_name(
+                f"{target_file.name}.{time.strftime('%Y%m%d_%H%M%S')}.bak"
+            )
+            bak_path.write_bytes(target_file.read_bytes())
 
         if not dry_run and not config.dryRun:
-            target_file.write_text(final_text, encoding="utf-8")
+            AgyAdapter.apply(processed)
 
         if not silent and not config.silent:
-            print(f"✨ Successfully cleaned AGY transcript: {target_file.name}", file=sys.stderr)
+            print(
+                f"Cleaned AGY transcript {target_file.name}: "
+                f"{stats.get('severe_rewritten', 0)} severe, "
+                f"{stats.get('refusals_rewritten', 0)} refusals, "
+                f"{stats.get('thinking_scrubbed', 0)} reasoning scrubbed.",
+                file=sys.stderr,
+            )
         return True
     except Exception as e:
         if not silent or config.debug:
-            print(f"⚠️ Error cleaning AGY session ({target_file}): {e}", file=sys.stderr)
+            print(f"Error cleaning AGY session ({target_file}): {e}", file=sys.stderr)
         return False
 
 
