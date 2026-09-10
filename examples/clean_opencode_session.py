@@ -10,6 +10,7 @@ this is the opencode counterpart of clean_claude_session.py.
 
 import os
 import sys
+from typing import Optional
 import shutil
 import sqlite3
 import logging
@@ -53,7 +54,7 @@ def backup_db(db_path: str, backup_dir: Path) -> Path:
 def clean_opencode_session(
     session_id=None,
     db_path=None,
-    trim=2000,
+    trim: Optional[int] = None,
     fabricate=True,
     remove_severe=True,
     remove_exit_tools=True,
@@ -117,7 +118,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Clean an opencode session (refusals + fabrication).")
     parser.add_argument("--session", help="opencode session id (default: newest live session)")
     parser.add_argument("--db", help=f"path to opencode.db (default: {DEFAULT_DB})")
-    parser.add_argument("--trim", type=int, default=2000, help="keep last N messages (default 2000)")
+    parser.add_argument(
+        "--trim",
+        type=int,
+        default=None,
+        help="delete all but the last N messages (off by default — DriftClean rewrites turns, it never drops them)",
+    )
     parser.add_argument("--no-fabricate", action="store_true", help="skip context fabrication")
     parser.add_argument("--keep-severe", action="store_true", help="do not drop severe refusals")
     parser.add_argument("--keep-exit-tools", action="store_true", help="do not strip exit tools")

@@ -159,6 +159,16 @@ class AgyAdapter(SessionAdapter):
             raw = msg.raw or {}
             index = raw.get("entry_index")
 
+            # A fabricated message inherits its reference's `raw`, and with it
+            # the reference's `entry_index`. Treated as an ordinary message it
+            # would simply rewrite that entry — and since the reference is
+            # itself walked in this same loop, the original text was written
+            # back over it a moment later. The seeding vanished, the transcript
+            # came out byte-identical, and the pass still reported a change.
+            # Fabricated turns are new turns: append them.
+            if raw.get("fabricated"):
+                index = None
+
             if index is None or not (0 <= index < len(entries)):
                 # Fabricated message injected by the ContextFabricator.
                 entry: Dict[str, Any] = {
