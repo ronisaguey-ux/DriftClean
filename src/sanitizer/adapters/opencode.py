@@ -242,9 +242,9 @@ class OpencodeAdapter(SessionAdapter):
                 if prow["id"] not in kept_calls:
                     commit["part_deletes"].append(prow["id"])
 
-            # keep the original message fields; stamp time_updated
-            md = deepcopy(raw.get("msg_data") or {})
-            commit["updates"][mid] = md
+            # Message metadata is never mutated by the sanitizer, so no message
+            # row is rewritten: touching every row each cycle would churn
+            # time_updated for the whole session on every background pass.
 
         original_data["_commit"] = commit
         original_data["_session"] = original_data.get("session") or {}
@@ -262,7 +262,15 @@ class OpencodeAdapter(SessionAdapter):
         now = _now_ms()
         stats = {"messages_updated": 0, "parts_updated": 0, "parts_deleted": 0, "parts_created": 0, "messages_inserted": 0}
 
-        if not commit.get("updates") and not commit.get("inserts"):
+        if not any(
+            (
+                commit.get("updates"),
+                commit.get("part_updates"),
+                commit.get("part_creates"),
+                commit.get("part_deletes"),
+                commit.get("inserts"),
+            )
+        ):
             return stats
 
         conn = sqlite3.connect(db_path, timeout=8)
