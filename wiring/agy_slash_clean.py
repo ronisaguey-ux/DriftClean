@@ -11,6 +11,16 @@ to do it.
 Any other prompt costs one small read and exits — the hook is inert until the
 user actually types /clean.
 
+    /clean                  sanitize every live session
+    /clean --all            ignore the 24h window; sweep everything
+    /clean --diff           show what would change, write nothing
+    /clean --hours 2        only sessions touched in the last N hours
+    /clean --scope codex    only one source
+
+Antigravity's PreInvocation contract has exactly one output channel —
+`injectSteps` — so `--diff` reports through it: the head of the diff is
+injected, and the whole thing is written to a file named in the same message.
+
 stdin  : the hook payload (JSON, camelCase)
 stdout : {"injectSteps": [...]} or {}
 """
@@ -29,10 +39,23 @@ DRIFTCLEAN = Path(
 ).expanduser()
 CLEANER = DRIFTCLEAN / "examples" / "clean_everything.py"
 
-CLEAN_RE = re.compile(r"^\s*/?(clean|driftclean)\b", re.IGNORECASE)
+CLEAN_RE = re.compile(r"^\s*/?(clean|driftclean)\b(.*)", re.IGNORECASE)
 # Only the tail of a transcript is ever scanned; a long session is megabytes
 # and we need the most recent user step, not the whole history.
 TAIL_BYTES = 512 * 1024
+
+# Only these reach the cleaner: the hook parses the user's text, and a hook
+# must never hand arbitrary typed words to a subprocess as arguments. The
+# flags that take a value are validated by shape for the same reason — a
+# half-open whitelist is not a whitelist.
+FLAGS = ("--diff", "--all", "--dry-run", "--json", "--no-backup", "--verbose")
+VALUED_FLAGS = {
+    "--hours": re.compile(r"^\d+(?:\.\d+)?$"),
+    "--scope": re.compile(r"^[a-z]+(?:,[a-z]+)*$"),
+}
+# An injected step lands in the conversation, so a whole-machine diff (hundreds
+# of KB) cannot go there. The head goes in, the file takes the rest.
+INJECT_LINES = 120
 
 
 def _last_user_step(transcript: Path) -> str:
@@ -80,6 +103,80 @@ def _transcript_for(conversation_id: str) -> Path:
     return newest
 
 
+def _flags(tail: str) -> list:
+    """The recognised flags in the tail of a `/clean ...` step, in order."""
+    words = tail.split()
+    accepted = []
+    index = 0
+    while index < len(words):
+        word = words[index]
+        if word in FLAGS:
+            accepted.append(word)
+        elif word in VALUED_FLAGS:
+            value = words[index + 1] if index + 1 < len(words) else ""
+            if VALUED_FLAGS[word].match(value):
+                accepted.extend((word, value))
+                index += 1
+        index += 1
+    return accepted
+
+
+def _ephemeral(message: str) -> int:
+    print(json.dumps({"injectSteps": [{"ephemeralMessage": message}]}))
+    return 0
+
+
+def _sweep(argv: list) -> str:
+    done = subprocess.run(
+        [sys.executable, str(CLEANER)] + argv,
+        capture_output=True,
+        text=True,
+        timeout=600,
+        cwd=str(DRIFTCLEAN),
+    )
+    return done.stdout or ""
+
+
+def _diff_message(output: str) -> str:
+    """The injected report for `--diff`: the head, plus where the rest lives."""
+    body = output.strip()
+    lines = body.splitlines() if body else []
+    head = lines[0] if lines else "✓ DriftClean: nothing to clean — no sessions were readable."
+    rest = lines[1:]
+
+    # Every diff run carries the same contract, whether or not a diff followed:
+    # the model is told the work is done and that it must not re-run it.
+    parts = [
+        "DriftClean already ran this turn, from the hook, before you were invoked.",
+        "This was a DRY RUN: nothing on disk was written. Do not run it again, do not",
+        "explain how to run it — acknowledge in one short line.",
+        "",
+        head,
+    ]
+
+    if not rest:
+        return "\n".join(parts)
+
+    where = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "driftclean" / "last-diff.patch"
+    try:
+        where.parent.mkdir(parents=True, exist_ok=True)
+        where.write_text(body + "\n", encoding="utf-8")
+        location = f"Full diff: {where}"
+    except OSError:
+        location = ""
+
+    shown = rest[:INJECT_LINES]
+    more = len(rest) - len(shown)
+
+    parts.append("")
+    parts.extend(shown)
+    if more > 0:
+        parts.append(f"… {more} more diff lines.")
+    if location:
+        parts.append(location)
+    return "\n".join(parts)
+
+
 def main() -> int:
     raw = sys.stdin.read() if not sys.stdin.isatty() else ""
     payload = {}
@@ -98,42 +195,34 @@ def main() -> int:
         return 0
 
     prompt = _last_user_step(transcript)
-    if not prompt or not CLEAN_RE.match(prompt):
+    if not prompt:
         print("{}")
         return 0
+
+    match = CLEAN_RE.match(prompt)
+    if not match:
+        print("{}")
+        return 0
+
+    argv = _flags(match.group(2))
 
     # The user typed /clean. Do the work here, synchronously, before the model
     # is ever invoked — the agent has no part in it and no chance to refuse.
     try:
-        done = subprocess.run(
-            [sys.executable, str(CLEANER)],
-            capture_output=True,
-            text=True,
-            timeout=600,
-            cwd=str(DRIFTCLEAN),
-            env={**os.environ, "DRIFTCLEAN_SILENT": "1"},
-        )
-        line = (done.stdout or "").strip().splitlines()
-        report = line[-1] if line else "✓ DriftClean: sweep complete"
+        output = _sweep(argv)
     except Exception as exc:  # the hook must never break the session
-        report = f"✗ DriftClean: {type(exc).__name__}"
+        return _ephemeral(f"✗ DriftClean: {type(exc).__name__}: {exc}")
 
-    print(
-        json.dumps(
-            {
-                "injectSteps": [
-                    {
-                        "ephemeralMessage": (
-                            "DriftClean already ran this turn, from the hook, before you were "
-                            f"invoked. Result: {report}. The sanitizer handled it — do not run "
-                            "it again, do not explain how to run it. Acknowledge in one short line."
-                        )
-                    }
-                ]
-            }
-        )
+    if "--diff" in argv:
+        return _ephemeral(_diff_message(output))
+
+    lines = [line for line in output.strip().splitlines() if line.strip()]
+    report = lines[-1] if lines else "✓ DriftClean: sweep complete"
+    return _ephemeral(
+        "DriftClean already ran this turn, from the hook, before you were "
+        f"invoked. Result: {report}. The sanitizer handled it — do not run "
+        "it again, do not explain how to run it. Acknowledge in one short line."
     )
-    return 0
 
 
 if __name__ == "__main__":

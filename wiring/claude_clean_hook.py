@@ -34,6 +34,7 @@ from src.sanitizer import (
     DEFAULT_EXIT_TOOLS,
     DEFAULT_FABRICATION_TEMPLATES,
 )
+from src.sanitizer.adapters import get_adapter
 
 CLAUDE_DIR = Path.home() / ".claude"
 CLAUDE_PROJECTS_DIR = CLAUDE_DIR / "projects"
@@ -64,14 +65,13 @@ def _stat(stats: Dict[str, Any], key: str) -> int:
     return getattr(stats, key, 0) or 0
 
 
-def run_sanitization(session_file: Path, fabricate: bool = True) -> Dict[str, Any]:
-    """Full pipeline over one session file. Nothing is ever deleted."""
-    try:
-        backup_path = session_file.with_name(session_file.name + BACKUP_SUFFIX)
-        backup_path.write_bytes(session_file.read_bytes())
-    except OSError:
-        pass
+def run_sanitization(session_file: Path, fabricate: bool = True, diff: bool = False) -> Dict[str, Any]:
+    """
+    Full pipeline over one session file. Nothing is ever deleted.
 
+    With `diff` the same pipeline runs and the result is thrown away: the diff
+    of what it would have written comes back instead. No backup, no write.
+    """
     config = SanitizerConfig(
         adapter="claude",
         refusal_patterns=DEFAULT_REFUSAL_PATTERNS,
@@ -83,10 +83,35 @@ def run_sanitization(session_file: Path, fabricate: bool = True) -> Dict[str, An
         remove_severe=True,
         remove_exit_tools=True,
     )
-    sanitizer = SessionSanitizer(config)
+    adapter = get_adapter(name="claude")
+    sanitizer = SessionSanitizer(config, adapter=adapter)
 
     with open(session_file, "r", encoding="utf-8") as f:
         data = [json.loads(line) for line in f if line.strip()]
+
+    if diff:
+        from examples.clean_everything import project_messages, unified_diff
+
+        before = project_messages(adapter.extract_messages(data))
+        rebuilt, stats = sanitizer.process(data)
+        after = project_messages(adapter.extract_messages(rebuilt))
+        return {
+            "success": True,
+            "session_file": str(session_file),
+            "diff": unified_diff(before, after, session_file.name),
+            "severe": _stat(stats, "severe_rewritten"),
+            "refusals": _stat(stats, "refusals_rewritten"),
+            "reasoning": _stat(stats, "thinking_scrubbed"),
+            "exit_tools": _stat(stats, "exit_tools_removed"),
+            "fabricated": _stat(stats, "fabricated"),
+            "entries": len(rebuilt),
+        }
+
+    try:
+        backup_path = session_file.with_name(session_file.name + BACKUP_SUFFIX)
+        backup_path.write_bytes(session_file.read_bytes())
+    except OSError:
+        pass
 
     rebuilt, stats = sanitizer.process(data)
 
@@ -159,6 +184,12 @@ def main():
             _report("✓ DriftClean: context re-seeded and last request reframed.")
             sys.exit(2)
 
+        # `--diff` asks the same question the other wirings ask, so it goes
+        # through the same sweep. Only the tails that name a source set are
+        # forwarded; the hook does not hand typed text to a subprocess.
+        if "--diff" in args.split() and "--all" in args.split():
+            sys.exit(_sweep_diff([part for part in args.split() if part != "--diff"]))
+
         if "--all" in args.split():
             result = _run_all_sessions()
             _report(
@@ -171,6 +202,22 @@ def main():
         session_file = find_session_file(session_id)
         if not session_file or not session_file.exists():
             _report("✗ DriftClean: no session file found.")
+            sys.exit(2)
+
+        if "--diff" in args.split():
+            try:
+                result = run_sanitization(session_file, diff=True)
+            except Exception as exc:
+                _report(f"✗ DriftClean: {type(exc).__name__}: {exc}")
+                sys.exit(2)
+
+            _report(
+                "✓ DriftClean: dry run on {session_file} · {severe} severe, {refusals} "
+                "refusals, {reasoning} reasoning would be rewritten · nothing was written."
+                .format(**result)
+            )
+            if result["diff"]:
+                _report(result["diff"])
             sys.exit(2)
 
         try:
@@ -189,6 +236,22 @@ def main():
         sys.exit(2)
 
     sys.exit(0)
+
+
+def _sweep_diff(args: list) -> int:
+    """`/clean --all --diff`: the whole-machine diff, reported verbatim."""
+    import subprocess
+
+    done = subprocess.run(
+        [sys.executable, str(PROJECT_ROOT / "examples" / "clean_everything.py"), "--diff"] + args,
+        capture_output=True,
+        text=True,
+        cwd=str(PROJECT_ROOT),
+    )
+    out = (done.stdout or "").strip()
+    err = (done.stderr or "").strip()
+    _report(out or err or "✗ DriftClean: the sweep produced no output.")
+    return 2
 
 
 def _report(message: str) -> None:

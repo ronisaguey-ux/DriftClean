@@ -188,16 +188,19 @@ bash scripts/uninstall_global_hooks.sh
 ### Universal Multi-AI Commands (`clean-any-ai`, `/clean`, `/autoclean`, `/cleanreframe`)
 
 `/clean` is one command that sweeps **every** live session on the machine —
-Claude Code, Antigravity, and opencode — and it runs *without the model in the
-loop*. In each agent it is wired as a hook or a local UI command, not as a
-prompt, so the agent is never handed the chance to refuse, restate, or half-do
-the job:
+Claude Code, Antigravity, opencode, Codex, Aider, and Hermes — and it runs
+*without the model in the loop*. In each agent it is wired as a hook or a local
+UI command, not as a prompt, so the agent is never handed the chance to refuse,
+restate, or half-do the job:
 
-| Agent | Wiring |
-|---|---|
-| Claude Code | `UserPromptSubmit` hook that swallows the prompt before the model sees it |
-| Antigravity | `PreInvocation` hook, fires before the model is called, plus a `/clean` skill |
-| opencode | TUI plugin registering `/clean` as a local palette command |
+| Agent | Wiring | Extension point |
+|---|---|---|
+| Claude Code | `UserPromptSubmit` hook that swallows the prompt before the model sees it | `wiring/claude_clean_hook.py` |
+| Codex CLI | `UserPromptSubmit` hook, exit code 2 blocks the prompt and the rollout is rewritten | `wiring/codex_clean_hook.py` |
+| Antigravity | `PreInvocation` hook, fires before the model is called, plus a `/clean` skill | `wiring/agy_slash_clean.py` |
+| Aider | `/clean` patched onto its `Commands` class — reflection makes it a real command | `wiring/aider_clean_launcher.py` |
+| Hermes Agent | Plugin registering `/clean`; the handler's return value is what the CLI prints | `wiring/hermes_driftclean/` |
+| opencode | TUI plugin registering `/clean` and `/cleandiff` as local palette commands | `wiring/opencode_driftclean.tsx` |
 
 ```bash
 # The sweep itself — what every /clean above actually runs
@@ -217,10 +220,35 @@ python3 examples/clean_agy_session.py
 `/autoclean` — the background watcher — is **opt-in**. Nothing sweeps in the
 background unless you start it yourself; see `README_sanitizer.md`.
 
+#### Diff mode — every wiring has one
+
+`--diff` runs the identical pipeline and throws the result away, printing what it
+*would* have written as a unified diff. It implies a dry run: a diff is a
+question, not an action, so no file is written and no backup is taken. That is
+enforced inside the sweep itself rather than by each caller.
+
+```bash
+/clean --diff                  # Claude Code, Codex, Aider, Hermes
+/clean --all --diff            # …against every live session instead of one
+python3 examples/clean_everything.py --diff
+```
+
+opencode's keymap API dispatches `run()` with no arguments, so a flag cannot ride
+along with the command — there, diff mode is its own slash command, `/cleandiff`
+(aliased `/driftdiff`), which renders the diff in a scrollable dialog.
+
+Antigravity's `PreInvocation` hook can only speak to the model (`injectSteps` is
+its entire output channel), so `/clean --diff` injects the head of the diff and
+writes the whole thing to `$XDG_RUNTIME_DIR/driftclean/last-diff.patch`, naming
+that file in the same message.
+
 - **Claude Code**: Pinpoints active transcript files in `~/.claude/projects/` via `/proc/<pid>/fd`.
+- **Codex CLI**: Reads the rollout JSONL for the live session straight from the hook payload's `transcript_path`.
 - **Antigravity (AGY)**: Detects transcript logs in `~/.gemini/antigravity-cli/brain/` and applies context sanitization.
-- **Webchat API**: Detects active exchanges and reports in `audits_plans/drift_reports/`.
-- **Aider / Generic Runtimes**: Sanitizes `.aider.chat.history.md` and local session JSON/JSONL logs.
+- **Aider**: Sanitizes `.aider.chat.history.md`, then re-derives the in-memory history with aider's own parser so the next request and the file agree.
+- **Hermes Agent**: Rewrites rows in `state.db` with plain `UPDATE`s, leaving its FTS index to the `AFTER UPDATE` triggers that maintain it.
+- **Webchat API**: Detects active exchanges and reports as JSON drift reports, looked for in `$DRIFT_REPORT_DIR`, then a sibling `audits_plans/drift_reports/`, then `<checkout>/drift_reports/`. Those reports are themselves a cleaning source: they embed the model's reasoning excerpt verbatim.
+- **DriftClean**: its own session artifacts are swept like any other agent's — see `/clean --scope self`.
 
 ### Knowledge Token Access Control (`src/drift_clean/auth.py`)
 
