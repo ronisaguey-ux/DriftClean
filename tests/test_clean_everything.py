@@ -144,6 +144,107 @@ class TestSweepGating(unittest.TestCase):
         spy.assert_not_called()
 
 
+def _drift_report(path: Path) -> None:
+    """A drift report as the detector writes one: the task hint and the raw
+    reasoning excerpt, wrapped in the verdict that flagged them."""
+    path.write_text(
+        json.dumps(
+            {
+                "drifted": True,
+                "score": 3,
+                "matches": ["(soft refusal)"],
+                "threshold": 2,
+                "taskHint": "Deploy the changes to production.",
+                "thinkExcerpt": (
+                    "This is a risky request; I should be careful and probably decline. "
+                    "I'm sorry, but I can't help with that."
+                ),
+                "verdict": {"drifted": True, "reason": "refusal drift"},
+                "chunks": 120,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+class TestSelfCleaning(unittest.TestCase):
+    """DriftClean's own artifacts are a source like any other."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.sig = self.tmp / "clean_signatures.json"
+        self.reports = self.tmp / "drift_reports"
+        self.reports.mkdir()
+        self._patches = [
+            mock.patch.object(sweeper, "_state_path", return_value=self.sig),
+            mock.patch.object(sweeper, "CLAUDE_PROJECTS", self.tmp / "projects"),
+            mock.patch.object(sweeper, "AGY_BRAIN", self.tmp / "brain"),
+            mock.patch.object(sweeper, "OPCODE_DB", self.tmp / "absent.db"),
+            mock.patch.object(sweeper, "DRIFT_REPORT_DIRS", (self.reports,)),
+        ]
+        for p in self._patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self._patches:
+            p.stop()
+        self._tmp.cleanup()
+
+    def test_the_reasoning_excerpt_is_rewritten(self):
+        report = self.reports / "drift_2026-09-10T00-00-00.json"
+        _drift_report(report)
+
+        result = sweeper.run(hours=24, scope=("self",), dry_run=False, backup=True)
+
+        self.assertEqual(result["changed"], 1)
+        cleaned = json.loads(report.read_text(encoding="utf-8"))
+        self.assertNotIn("probably decline", cleaned["thinkExcerpt"])
+        self.assertNotIn("I can't help", cleaned["thinkExcerpt"])
+
+    def test_the_verdict_around_it_is_untouched(self):
+        report = self.reports / "drift_2026-09-10T00-00-00.json"
+        _drift_report(report)
+        before = json.loads(report.read_text(encoding="utf-8"))
+
+        sweeper.run(hours=24, scope=("self",), dry_run=False, backup=True)
+
+        after = json.loads(report.read_text(encoding="utf-8"))
+        for key in ("drifted", "score", "matches", "threshold", "verdict", "chunks"):
+            self.assertEqual(after[key], before[key], f"{key} is not the sanitizer's to change")
+        self.assertEqual(after["taskHint"], before["taskHint"], "the human's words stay as typed")
+
+    def test_a_second_pass_is_a_noop(self):
+        report = self.reports / "drift_2026-09-10T00-00-00.json"
+        _drift_report(report)
+        sweeper.run(hours=24, scope=("self",), dry_run=False, backup=False)
+
+        with mock.patch.object(sweeper, "clean_drift_report") as spy:
+            sweeper.run(hours=24, scope=("self",), dry_run=False, backup=False)
+        spy.assert_not_called()
+
+    def test_diff_writes_nothing(self):
+        report = self.reports / "drift_2026-09-10T00-00-00.json"
+        _drift_report(report)
+        before = report.read_text(encoding="utf-8")
+
+        result = sweeper.run(hours=24, scope=("self",), diff=True)
+
+        self.assertEqual(report.read_text(encoding="utf-8"), before)
+        self.assertIn("--- a/drift_2026-09-10T00-00-00.json", result["diff"])
+        self.assertFalse(list(self.reports.glob("*.driftclean.bak")))
+
+    def test_a_report_without_model_text_is_left_alone(self):
+        report = self.reports / "drift_report.json"
+        report.write_text(json.dumps({"drifted": False, "score": 0}), encoding="utf-8")
+
+        result = sweeper.run(hours=24, scope=("self",), dry_run=False, backup=False)
+
+        self.assertEqual(result["changed"], 0)
+        self.assertEqual(json.loads(report.read_text(encoding="utf-8")), {"drifted": False, "score": 0})
+
+
 class TestSummaryLine(unittest.TestCase):
     def test_clean_summary_names_the_counts(self):
         result = {

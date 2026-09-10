@@ -1,0 +1,4 @@
+name: driftclean
+version: 1.0.0
+description: "Adds /clean — rewrites drifted assistant turns in Hermes sessions (refusals, hedge-thinking, exit tools) directly in state.db. Runs in-process; the model is never consulted."
+author: "DriftClean"

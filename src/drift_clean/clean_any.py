@@ -89,14 +89,19 @@ def discover_agy_sessions() -> List[Tuple[Optional[int], Path]]:
 
 def discover_webchat_sessions() -> List[Tuple[Optional[int], Path]]:
     """Discover Webchat API active sessions and drift reports."""
-    results = []
-    report_dir = Path.home() / "Roni_Workspace" / "audits_plans" / "drift_reports"
-    if report_dir.exists():
-        reports = list(report_dir.glob("drift_*.json"))
-        if reports:
-            latest = max(reports, key=lambda p: p.stat().st_mtime)
-            results.append((None, latest))
-    return results
+    from src.drift_clean.paths import drift_report_dirs
+
+    reports = [
+        path
+        for directory in drift_report_dirs()
+        if directory.is_dir()
+        for path in directory.glob("drift_*.json")
+        if path.is_file()
+    ]
+    if not reports:
+        return []
+    latest = max(reports, key=lambda p: p.stat().st_mtime)
+    return [(None, latest)]
 
 
 def discover_generic_ai_sessions() -> List[Tuple[Optional[int], Path]]:
