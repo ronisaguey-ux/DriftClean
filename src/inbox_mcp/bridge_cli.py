@@ -25,13 +25,32 @@ import argparse
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
-from .server import (
-    INBOX_FILE,
-    ensure_inbox,
-    read_all_messages,
-    write_all_messages,
-    append_message,
-)
+try:
+    from .server import (
+        INBOX_FILE,
+        ensure_inbox,
+        read_all_messages,
+        write_all_messages,
+        append_message,
+    )
+except (ImportError, ValueError):
+    try:
+        from server import (
+            INBOX_FILE,
+            ensure_inbox,
+            read_all_messages,
+            write_all_messages,
+            append_message,
+        )
+    except ImportError:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from server import (
+            INBOX_FILE,
+            ensure_inbox,
+            read_all_messages,
+            write_all_messages,
+            append_message,
+        )
 
 
 def send_message(

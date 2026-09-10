@@ -45,9 +45,9 @@ fi
 export PYTHONPATH="$DRIFT_CLEAN_HOME:${PYTHONPATH:-}"
 
 # Global slash command aliases for all terminals
-alias /clean="clean-any-ai clean"
-alias /autoclean="clean-any-ai autoclean"
-alias /cleanreframe="clean-any-ai cleanreframe"
+alias clean="clean-any-ai clean"
+alias autoclean="clean-any-ai autoclean"
+alias cleanreframe="clean-any-ai cleanreframe"
 # <<< DRIFT_CLEAN_HOOKS <<<
 EOF
             echo "✅ Configured hooks & aliases in: $target_file"

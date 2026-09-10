@@ -176,6 +176,103 @@ def tool_reply(
     }
 
 
+def tool_send_message_to_claude(
+    message: str,
+    subject: str = "General",
+    priority: str = "normal",
+) -> Dict[str, Any]:
+    """Send a message from Antigravity to Claude Code."""
+    msg_id = f"msg_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+    ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    msg_obj = {
+        "id": msg_id,
+        "timestamp": ts,
+        "from": "antigravity",
+        "to": "claude_code",
+        "subject": subject,
+        "priority": priority,
+        "content": message,
+        "status": "unread",
+        "reply_to": None,
+    }
+    append_message(msg_obj)
+
+    return {
+        "status": "delivered",
+        "message_id": msg_id,
+        "timestamp": ts,
+        "summary": f"Message '{subject}' queued for Claude Code (ID: {msg_id})",
+    }
+
+
+def tool_check_inbox_from_claude(
+    unread_only: bool = True,
+    limit: int = 10,
+) -> Dict[str, Any]:
+    """Check inbox for messages sent from Claude Code to Antigravity."""
+    all_msgs = read_all_messages()
+    incoming = []
+    updated = False
+
+    for m in all_msgs:
+        if m.get("to") == "antigravity":
+            if unread_only and m.get("status") != "unread":
+                continue
+            incoming.append(m)
+            if m.get("status") == "unread":
+                m["status"] = "read"
+                m["read_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                updated = True
+
+    if updated:
+        write_all_messages(all_msgs)
+
+    incoming_slice = incoming[-limit:]
+
+    return {
+        "count": len(incoming_slice),
+        "unread_only": unread_only,
+        "messages": incoming_slice,
+    }
+
+
+def tool_reply_to_claude(
+    message_id: str,
+    reply: str,
+) -> Dict[str, Any]:
+    """Reply directly to a specific incoming message from Claude Code."""
+    reply_id = f"msg_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+    ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    all_msgs = read_all_messages()
+    parent_subject = "Re: Message"
+    for m in all_msgs:
+        if m.get("id") == message_id:
+            parent_subject = f"Re: {m.get('subject', 'Message')}"
+            break
+
+    msg_obj = {
+        "id": reply_id,
+        "timestamp": ts,
+        "from": "antigravity",
+        "to": "claude_code",
+        "subject": parent_subject,
+        "priority": "normal",
+        "content": reply,
+        "status": "unread",
+        "reply_to": message_id,
+    }
+    append_message(msg_obj)
+
+    return {
+        "status": "reply_sent",
+        "reply_id": reply_id,
+        "in_response_to": message_id,
+        "timestamp": ts,
+    }
+
+
 # ----------------------------------------------------------------------
 # MCP Protocol Handler (JSON-RPC 2.0 over Stdio)
 # ----------------------------------------------------------------------
@@ -257,6 +354,68 @@ TOOLS_DEFINITION = [
             "required": ["message_id", "reply"],
         },
     },
+    {
+        "name": "send_message_to_claude",
+        "description": "Send a message, question, spec, or task to Claude Code's session.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "The message body to send to Claude Code.",
+                },
+                "subject": {
+                    "type": "string",
+                    "description": "Optional short topic or subject line.",
+                    "default": "General",
+                },
+                "priority": {
+                    "type": "string",
+                    "enum": ["normal", "high", "urgent"],
+                    "description": "Message priority level.",
+                    "default": "normal",
+                },
+            },
+            "required": ["message"],
+        },
+    },
+    {
+        "name": "check_inbox_from_claude",
+        "description": "Check the inbox for incoming messages or replies sent from Claude Code to Antigravity.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "unread_only": {
+                    "type": "boolean",
+                    "description": "If true, returns only unread messages. Defaults to true.",
+                    "default": True,
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of messages to retrieve.",
+                    "default": 10,
+                },
+            },
+        },
+    },
+    {
+        "name": "reply_to_claude",
+        "description": "Reply directly to a specific incoming message from Claude Code.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "message_id": {
+                    "type": "string",
+                    "description": "The ID of the message to reply to.",
+                },
+                "reply": {
+                    "type": "string",
+                    "description": "The response content to send.",
+                },
+            },
+            "required": ["message_id", "reply"],
+        },
+    },
 ]
 
 
@@ -316,6 +475,22 @@ def handle_request(req: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 )
             elif tool_name == "reply_to_antigravity":
                 res = tool_reply(
+                    message_id=args.get("message_id", ""),
+                    reply=args.get("reply", ""),
+                )
+            elif tool_name == "send_message_to_claude":
+                res = tool_send_message_to_claude(
+                    message=args.get("message", ""),
+                    subject=args.get("subject", "General"),
+                    priority=args.get("priority", "normal"),
+                )
+            elif tool_name == "check_inbox_from_claude":
+                res = tool_check_inbox_from_claude(
+                    unread_only=args.get("unread_only", True),
+                    limit=args.get("limit", 10),
+                )
+            elif tool_name == "reply_to_claude":
+                res = tool_reply_to_claude(
                     message_id=args.get("message_id", ""),
                     reply=args.get("reply", ""),
                 )
