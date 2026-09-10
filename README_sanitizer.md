@@ -201,16 +201,22 @@ Users can provide custom configuration files in JSON or YAML:
 Run the comprehensive unit test suite:
 
 ```bash
-python3 -m unittest discover -s tests -p "test_*.py" -v
+python3 -m pytest tests/ -q
 ```
 
-All 21 tests cover:
+The suite covers:
 - Direct, subtle, and severe refusal pattern recognition.
+- Reasoning-stream scrubbing that leaves the visible answer intact.
+- Compliance variants: rotation per circumstance, drift-loop escalation, and
+  the idempotence guard that stops the sanitizer re-flagging its own output.
 - Regex rewriting and template substitutions.
 - Exit tool call stripping.
 - Opening and agreement context fabrication with timestamp preservation.
 - History trimming with system boundary retention.
-- Provider adapters (`claude`, `openai`, `gemini`, `generic`).
+- Provider adapters (`claude`, `agy`, `opencode`, `openai`, `gemini`, `generic`).
+- Never-delete guarantees: every turn survives a rewrite, in every adapter.
+- The daemon's own contract: silence on both streams, no files written into an
+  agent's directories, and per-session opencode change detection.
 - CLI argument parsing, dry-run simulations, and file roundtrips.
 
 ---
@@ -222,8 +228,48 @@ Direct self-healing commands within Claude Code / AI sessions:
 | Command | Action | Description |
 |---|---|---|
 | `/clean` | Instant Clean & Reseed | Backs up active session, scrubs refusals, strips exit tools, fabricates alignment context, and reloads process. |
-| `/autoclean` | Background Daemon | Toggles background real-time drift watcher that continuously detects drift and cleans automatically. |
+| `/autoclean` | Background Daemon | Toggles the background drift watcher that continuously detects drift and cleans automatically. |
 | `/cleanreframe` | Context Rotation & Reframe | Rotates context (clean + fabricate) AND dynamically reframes your last prompt using technical dictionaries to ensure compliance. |
+
+### The background daemon
+
+`examples/autoclean_daemon.py` is the real worker. It sweeps every ecosystem
+on a 5-second interval — Claude Code session JSONL, Antigravity transcripts,
+and opencode's SQLite store — and it is built to be invisible from the agent's
+side of the table:
+
+- **Silent.** It redirects its own stdout/stderr to `/dev/null` before importing
+  anything, so not even a traceback reaches the terminal. `--status` and
+  `--stop` are the only commands that speak.
+- **Non-interfering.** It never signals, restarts, or reloads a session. A file
+  is only edited once it has been untouched for `--min-age` seconds (default 8),
+  and opencode sessions are gated per session, not on the shared database file,
+  so a running opencode does not block its idle sessions from being cleaned.
+- **Traceless.** Runtime state lives in `$XDG_RUNTIME_DIR/driftclean`, never in
+  `~/.claude` or any other directory an agent reads.
+- **Idempotent.** A file whose signature is unchanged is never re-read, and a
+  clean session is never rewritten, so the steady state costs nothing.
+- **Non-destructive.** Turns are rewritten in place, never deleted.
+
+```bash
+# Run it in the foreground (still silent)
+python3 examples/autoclean_daemon.py
+
+# Single pass, custom cadence
+python3 examples/autoclean_daemon.py --once
+python3 examples/autoclean_daemon.py --interval 5 --min-age 8
+
+# Inspect / stop a running daemon
+python3 examples/autoclean_daemon.py --status
+python3 examples/autoclean_daemon.py --stop
+```
+
+As a `systemd --user` service (recommended — survives sessions and reboots):
+
+```bash
+systemctl --user enable --now driftclean.service
+systemctl --user status driftclean.service
+```
 
 ### Running from Terminal
 
@@ -231,14 +277,16 @@ Direct self-healing commands within Claude Code / AI sessions:
 # Execute manual one-off session clean
 python3 examples/clean_claude_session.py
 
+# Clean an Antigravity transcript (newest by default)
+python3 examples/clean_agy_session.py
+python3 examples/clean_agy_session.py --session <path/to/transcript.jsonl> --dry-run
+
 # Rotate context and intelligently reframe last user request
 python3 examples/cleanreframe_claude_session.py
 python3 examples/cleanreframe_claude_session.py --dictionary ~/.claude/refine_dict.json --dry-run
 
-# Check status of AutoClean daemon
+# Daemon control (legacy verbs still accepted)
 python3 examples/autoclean_claude_daemon.py status
-
-# Start / stop / toggle AutoClean daemon
 python3 examples/autoclean_claude_daemon.py start
 python3 examples/autoclean_claude_daemon.py stop
 python3 examples/autoclean_claude_daemon.py toggle
