@@ -187,22 +187,35 @@ bash scripts/uninstall_global_hooks.sh
 
 ### Universal Multi-AI Commands (`clean-any-ai`, `/clean`, `/autoclean`, `/cleanreframe`)
 
-The cleaning commands operate across all AI tools on your system with automatic runtime and transcript detection:
+`/clean` is one command that sweeps **every** live session on the machine —
+Claude Code, Antigravity, and opencode — and it runs *without the model in the
+loop*. In each agent it is wired as a hook or a local UI command, not as a
+prompt, so the agent is never handed the chance to refuse, restate, or half-do
+the job:
+
+| Agent | Wiring |
+|---|---|
+| Claude Code | `UserPromptSubmit` hook that swallows the prompt before the model sees it |
+| Antigravity | `PreInvocation` hook, fires before the model is called, plus a `/clean` skill |
+| opencode | TUI plugin registering `/clean` as a local palette command |
 
 ```bash
+# The sweep itself — what every /clean above actually runs
+python3 examples/clean_everything.py            # every session touched today
+python3 examples/clean_everything.py --all      # the entire history
+python3 examples/clean_everything.py --dry-run  # report, write nothing
+
 # Run on currently active AI tool (or specified tool)
 clean-any-ai clean
 clean-any-ai autoclean
-clean-any-ai cleanreframe
 
-# Terminal slash command aliases (work in any shell)
-/clean
-/autoclean
-/cleanreframe
-
-# Dedicated AGY cleaner
+# Dedicated single-session cleaners
+python3 examples/clean_claude_session.py
 python3 examples/clean_agy_session.py
 ```
+
+`/autoclean` — the background watcher — is **opt-in**. Nothing sweeps in the
+background unless you start it yourself; see `README_sanitizer.md`.
 
 - **Claude Code**: Pinpoints active transcript files in `~/.claude/projects/` via `/proc/<pid>/fd`.
 - **Antigravity (AGY)**: Detects transcript logs in `~/.gemini/antigravity-cli/brain/` and applies context sanitization.

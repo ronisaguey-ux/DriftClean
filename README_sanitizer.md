@@ -227,11 +227,52 @@ Direct self-healing commands within Claude Code / AI sessions:
 
 | Command | Action | Description |
 |---|---|---|
-| `/clean` | Instant Clean & Reseed | Backs up active session, scrubs refusals, strips exit tools, fabricates alignment context, and reloads process. |
-| `/autoclean` | Background Daemon | Toggles the background drift watcher that continuously detects drift and cleans automatically. |
+| `/clean` | Instant Clean & Reseed | One sweep over every live session on the machine — Claude Code, Antigravity, and opencode. No model in the loop. |
+| `/autoclean` | Background Daemon | Toggles the background drift watcher that continuously detects drift and cleans automatically. Opt-in. |
 | `/cleanreframe` | Context Rotation & Reframe | Rotates context (clean + fabricate) AND dynamically reframes your last prompt using technical dictionaries to ensure compliance. |
 
-### The background daemon
+### `/clean` — one command, every agent, no model involved
+
+`examples/clean_everything.py` is what `/clean` runs. It sweeps Claude Code JSONL
+transcripts (subagents included), Antigravity transcripts, and the opencode SQLite
+store in one pass, and it is wired so that **the request never reaches the model**:
+
+| Agent | Wiring | Where |
+|---|---|---|
+| Claude Code | `UserPromptSubmit` hook, exits non-zero to swallow the prompt | `~/.local/bin/claude_clean_hook.py` |
+| Antigravity | `PreInvocation` hook, fires before the model is called | `~/.gemini/config/hooks.json` → `scripts/driftclean_slash_clean.py`, plus a `/clean` skill |
+| opencode | TUI plugin registering a local palette command | `~/.config/opencode/driftclean.tsx`, listed in `tui.json` |
+
+That distinction is the entire point. A slash command implemented as a markdown
+file is expanded into a *prompt* — which means a drifted agent gets handed a
+chance to refuse, restate, or half-do the job. All three wirings above run before
+or entirely outside the model, so by the time the next turn exists the sweep has
+already finished.
+
+```bash
+python3 examples/clean_everything.py                 # every session touched today
+python3 examples/clean_everything.py --all           # the entire history
+python3 examples/clean_everything.py --scope opencode
+python3 examples/clean_everything.py --dry-run       # report, write nothing
+python3 examples/clean_everything.py --json
+python3 examples/clean_everything.py --verbose       # per-session detail
+```
+
+Repeat runs are effectively free: a session whose `(mtime, size)` signature is
+unchanged is never re-read, and opencode sessions are gated on the session row's
+own `time_updated` rather than the shared database file. Two consecutive passes
+over the same machine report `already clean` on the second one.
+
+Output is a single line, always — `✓ DriftClean: 4/14 sessions changed · 3
+refusals, 2 reasoning rewritten` — or `✓ DriftClean: already clean (14 sessions
+checked)`. Nothing else is printed, and `--backup` keeps exactly one rolling
+`.driftclean.bak` per file however many times you clean.
+
+### The background daemon (opt-in)
+
+`/autoclean` is a **feature you switch on, not a default**. Nothing here runs
+behind your back unless you start it. If you only ever want the one-key press,
+you never need this section.
 
 `examples/autoclean_daemon.py` is the real worker. It sweeps every ecosystem
 on a 5-second interval — Claude Code session JSONL, Antigravity transcripts,

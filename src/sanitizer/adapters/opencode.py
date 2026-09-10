@@ -196,6 +196,24 @@ class OpencodeAdapter(SessionAdapter):
             raw = msg.raw or {}
             mid = raw.get("mid")
 
+            # A fabricated message inherits its reference's `raw` for format
+            # fidelity — and with it the reference's `mid`. Left alone, that
+            # makes it an alias of an existing message: every "insert" was
+            # folded onto the turn it was cloned from and silently dropped by
+            # the diff, so the seeding never landed and the session was
+            # reported as changed on every pass forever. The fabricators mark
+            # their messages; honour the mark and give it its own row.
+            if raw.get("fabricated"):
+                commit["inserts"].append(
+                    {
+                        "role": msg.role,
+                        "content": msg.get_text_content(),
+                        "parent_id": mid or None,
+                        "fabricated": True,
+                    }
+                )
+                continue
+
             if not mid:
                 # Fabricated message (ContextFabricator) — insert as new message+text part
                 commit["inserts"].append({"role": msg.role, "content": msg.get_text_content()})
@@ -306,14 +324,20 @@ class OpencodeAdapter(SessionAdapter):
                 mid = _new_id()
                 pid = _new_id()
                 t = ins.get("ts") or now
+                # parentID is what opencode uses to hang a reply off the turn
+                # it answers; a fabricated turn goes under the message it was
+                # cloned from, same as any other assistant reply.
+                payload: Dict[str, Any] = {
+                    "role": ins.get("role", "assistant"),
+                    "time": {"created": t},
+                    "summary": "context initialization",
+                }
+                if ins.get("parent_id"):
+                    payload["parentID"] = ins["parent_id"]
                 conn.execute(
                     "INSERT OR REPLACE INTO message(id, session_id, time_created, time_updated, data) "
                     "VALUES (?, ?, ?, ?, ?)",
-                    (mid, session_id, t, now, json.dumps({
-                        "role": ins.get("role", "assistant"),
-                        "time": {"created": t},
-                        "summary": "context initialization",
-                    }, ensure_ascii=False)),
+                    (mid, session_id, t, now, json.dumps(payload, ensure_ascii=False)),
                 )
                 conn.execute(
                     "INSERT OR REPLACE INTO part(id, message_id, session_id, time_created, time_updated, data) "

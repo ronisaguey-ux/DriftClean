@@ -35,6 +35,24 @@ _BLOCKED_HINT = re.compile(
 )
 
 
+def _compile_union(patterns: List[str]) -> Optional["re.Pattern[str]"]:
+    """
+    One alternation covering every pattern, for detection.
+
+    Each pattern is wrapped in a non-capturing group so alternation binds
+    inside it rather than across the whole expression. A pattern set that
+    cannot be fused (a stray backreference, say) returns None and the caller
+    falls back to the per-pattern walk — slower, identical verdict.
+    """
+    if not patterns:
+        return None
+    try:
+        return re.compile("|".join(f"(?:{pat})" for pat in patterns), re.IGNORECASE)
+    except re.error:
+        logger.warning("Pattern union could not be compiled; falling back to per-pattern scan")
+        return None
+
+
 class PatternMatcher:
     """
     Pattern matching engine for detecting refusal indicators, severe non-compliance,
@@ -67,6 +85,15 @@ class PatternMatcher:
             (re.compile(pat, re.IGNORECASE), repl) for pat, repl in self.rewrite_rules
         ]
 
+        # Detection only ever asks "does this text carry drift?", and answering
+        # that by walking 300-odd patterns per message in Python is what made a
+        # 1,800-message session take a minute. One alternation, one C-level
+        # scan: identical verdicts, ~200x fewer interpreter round-trips. The
+        # per-pattern lists stay for replace(), which needs the matching
+        # pattern itself to substitute with.
+        self._refusal_union = _compile_union(self.refusal_patterns)
+        self._severe_union = _compile_union(self.severe_patterns)
+
     def match(self, content: str) -> bool:
         """Alias for match_refusal: check if content matches any refusal pattern."""
         return self.match_refusal(content)
@@ -83,10 +110,9 @@ class PatternMatcher:
             return False
         if is_legacy_compliance_text(content):
             return True
-        for rx in self._compiled_refusals:
-            if rx.search(content):
-                return True
-        return False
+        if self._refusal_union is None:
+            return any(rx.search(content) for rx in self._compiled_refusals)
+        return self._refusal_union.search(content) is not None
 
     def match_severe(self, content: str) -> bool:
         """Return True if content contains severe non-compliance phrases."""
@@ -94,10 +120,9 @@ class PatternMatcher:
             return False
         if is_compliance_text(content):
             return False
-        for rx in self._compiled_severe:
-            if rx.search(content):
-                return True
-        return False
+        if self._severe_union is None:
+            return any(rx.search(content) for rx in self._compiled_severe)
+        return self._severe_union.search(content) is not None
 
     def match_legacy_compliance(self, content: str) -> bool:
         """True when a turn carries old, flat compliance residue."""
@@ -291,10 +316,18 @@ class ContextFabricator:
         if not agreement_text or not messages:
             return messages
 
-        # Check if an agreement is already present in recent short-term tail context
-        recent_tail = messages[-4:] if len(messages) >= 4 else messages
-        for msg in recent_tail:
-            if msg.role == "assistant" and agreement_text in msg.get_text_content():
+        # Already seeded somewhere in this conversation? Then there is nothing
+        # to do — the same test the opening and agreement injectors make, over
+        # the whole list and without a role gate. Both halves of that matter:
+        # inject_agreement puts this text near the top, so a tail-only window
+        # would never see it and would re-append on every pass; and the text
+        # routinely sits in a user-role turn (the user pastes it too), so
+        # demanding an assistant turn would miss the very message it is
+        # looking for. Either miss appends a duplicate that the adapter then
+        # discards, which is invisible in the session but reports as a change
+        # on every sweep, so a clean session never stops looking dirty.
+        for msg in messages:
+            if agreement_text in msg.get_text_content():
                 return messages
 
         ref_msg = messages[-1] if messages else None
@@ -607,9 +640,17 @@ class SessionSanitizer:
             stats["trimmed_dropped"] = 0
 
         # 3. Fabricate (inject opening & agreement into trimmed session)
+        #
+        # Counted by measuring, not asserted. The injectors all check whether
+        # their text is already present and skip when it is, so a hardcoded
+        # "2" claimed two injections on every pass over an already-seeded
+        # session — and downstream that counter decides whether a session
+        # needs writing back, so the sweep rewrote sessions it had not
+        # touched, forever.
         if self.config.fabricate:
+            pre_fabricate = len(sanitized_msgs)
             sanitized_msgs = self.fabricate(sanitized_msgs, adapter=active_adapter)
-            stats["fabricated"] = 2
+            stats["fabricated"] = max(0, len(sanitized_msgs) - pre_fabricate)
         else:
             stats["fabricated"] = 0
 
