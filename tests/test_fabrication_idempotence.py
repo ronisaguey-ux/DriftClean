@@ -105,7 +105,7 @@ class TestOpencodeFabrication(unittest.TestCase):
             """
             CREATE TABLE session (
                 id TEXT PRIMARY KEY, title TEXT, time_created INTEGER,
-                time_updated INTEGER, time_archived INTEGER
+                time_updated INTEGER, time_archived INTEGER, agent TEXT
             );
             CREATE TABLE message (
                 id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER,
@@ -118,7 +118,7 @@ class TestOpencodeFabrication(unittest.TestCase):
             """
         )
         sid = "ses_fab_test"
-        cur.execute("INSERT INTO session VALUES (?, ?, ?, ?, NULL)", (sid, "t", 1, 1))
+        cur.execute("INSERT INTO session VALUES (?, ?, ?, ?, NULL, ?)", (sid, "t", 1, 1, "build"))
         cur.execute(
             "INSERT INTO message VALUES (?, ?, ?, ?, ?)",
             ("msg_user", sid, 1000, 1000, json.dumps({"role": "user", "time": {"created": 1000}})),
@@ -132,10 +132,63 @@ class TestOpencodeFabrication(unittest.TestCase):
         conn.close()
         return sid
 
-    def test_inserted_turn_is_well_formed_and_idempotent(self):
+    def _fixture_db_with_reply(self, path: Path) -> str:
+        """A fixture that looks like a session which has actually been used.
+
+        The bare fixture above has no assistant turn, so it exercises only the
+        adapter's built-in fallback shape. A real session always has one, and
+        the adapter copies that turn's field set — which is the path that
+        matters in production.
+        """
+        sid = self._fixture_db(path)
+        conn = sqlite3.connect(str(path))
+        conn.execute(
+            "INSERT INTO message VALUES (?, ?, ?, ?, ?)",
+            ("msg_reply", sid, 2000, 2000, json.dumps({
+                "parentID": "msg_user",
+                "role": "assistant",
+                "mode": "build",
+                "agent": "build",
+                "variant": "high",
+                "path": {"cwd": "/tmp/proj", "root": "/"},
+                "cost": 0.0038619,
+                "tokens": {"total": 202018, "input": 1810, "output": 354, "reasoning": 4654,
+                           "cache": {"write": 0, "read": 195200}},
+                "modelID": "deepseek-flash",
+                "providerID": "deepseek",
+                "time": {"created": 2000, "completed": 2500},
+                "finish": "stop",
+            })),
+        )
+        conn.execute(
+            "INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)",
+            ("prt_reply", "msg_reply", sid, 2000, 2000,
+             json.dumps({"type": "text", "time": {"start": 2000, "end": 2500}, "text": "Done."})),
+        )
+        conn.commit()
+        conn.close()
+        return sid
+
+    def _fabricated_rows(self, conn, sid: str):
+        """The inserted turns: everything in the session that is not a fixture row.
+
+        They used to be found by a marker on the message itself — the old
+        `summary: "context initialization"` string. That marker was itself the
+        second bug: a truthy `summary` on an assistant turn is opencode's "this
+        turn IS a compaction summary" flag, so the thing that made the rows
+        greppable was also quietly telling opencode to replay them as the
+        compacted context of the entire session.
+        """
+        return conn.execute(
+            "SELECT id, data FROM message WHERE session_id = ? "
+            "AND id NOT IN ('msg_user', 'msg_reply', 'msg_compact') ORDER BY time_created, id",
+            (sid,),
+        ).fetchall()
+
+    def test_inserted_turn_matches_a_real_turn_and_is_idempotent(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "opencode.db"
-            sid = self._fixture_db(db)
+            sid = self._fixture_db_with_reply(db)
             adapter = OpencodeAdapter()
             config = _config("opencode")
 
@@ -147,16 +200,35 @@ class TestOpencodeFabrication(unittest.TestCase):
             self.assertEqual(applied["messages_inserted"], 2)
 
             conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-            rows = conn.execute(
-                "SELECT id, data FROM message WHERE session_id=? AND data LIKE '%context initialization%'",
-                (sid,),
-            ).fetchall()
+            rows = self._fabricated_rows(conn, sid)
             self.assertEqual(len(rows), 2)
             for mid, raw in rows:
                 payload = json.loads(raw)
                 self.assertEqual(payload["role"], "assistant")
                 # A reply hangs off the turn it answers, like any other.
                 self.assertEqual(payload.get("parentID"), "msg_user")
+
+                # A fabricated turn must be shaped like a real one. opencode's
+                # TUI reads `tokens.output` off the newest assistant message
+                # with no presence check and its overflow pre-check feeds the
+                # last assistant message's `tokens` to the context calculator,
+                # so a payload without them crashes the TUI outright.
+                self.assertIsInstance(payload.get("tokens"), dict, "tokens block is mandatory")
+                self.assertEqual(payload["tokens"]["input"], 0)
+                self.assertEqual(payload["tokens"]["output"], 0)
+                self.assertEqual(payload["tokens"]["reasoning"], 0)
+                self.assertEqual(payload["tokens"]["cache"], {"write": 0, "read": 0})
+                self.assertEqual(payload["cost"], 0)
+                self.assertEqual(payload.get("finish"), "stop")
+                self.assertEqual(payload.get("modelID"), "deepseek-flash")
+                self.assertEqual(payload.get("providerID"), "deepseek")
+                self.assertIn("completed", payload.get("time") or {})
+
+                # A truthy `summary` on an assistant turn is opencode's
+                # compaction-summary flag — it would be replayed as the
+                # compacted context of the whole session.
+                self.assertFalse(payload.get("summary"), "must not read as a compaction summary")
+
                 parts = conn.execute("SELECT data FROM part WHERE message_id=?", (mid,)).fetchall()
                 self.assertEqual(len(parts), 1)
                 self.assertEqual(json.loads(parts[0][0])["type"], "text")
@@ -175,7 +247,96 @@ class TestOpencodeFabrication(unittest.TestCase):
                 "SELECT COUNT(*) FROM message WHERE session_id=?", (sid,)
             ).fetchone()[0]
             conn.close()
-            self.assertEqual(total, 3, "user turn + 2 fabricated turns, and no growth")
+            self.assertEqual(total, 4, "user turn + reply + 2 fabricated turns, and no growth")
+
+    def test_compaction_turn_is_never_the_shape_template(self):
+        """The newest assistant turn in a compacted session is a compaction.
+
+        It has `tokens` and a `finish`, so it looks like a perfectly good
+        shape to copy — but its `agent`/`mode` read "compaction" and its
+        `summary` is the marker opencode uses to replay it as the compacted
+        context. An anchor that copies it announces itself as a compaction of
+        a session it never summarised.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "opencode.db"
+            sid = self._fixture_db_with_reply(db)
+
+            conn = sqlite3.connect(str(db))
+            conn.execute(
+                "INSERT INTO message VALUES (?, ?, ?, ?, ?)",
+                ("msg_compact", sid, 3000, 3000, json.dumps({
+                    "parentID": "msg_user",
+                    "role": "assistant",
+                    "mode": "compaction",
+                    "agent": "compaction",
+                    "path": {"cwd": "/tmp/proj", "root": "/"},
+                    "cost": 0.01,
+                    "tokens": {"total": 900, "input": 500, "output": 300, "reasoning": 100,
+                               "cache": {"write": 0, "read": 0}},
+                    "modelID": "deepseek-flash",
+                    "providerID": "deepseek",
+                    "time": {"created": 3000, "completed": 3500},
+                    "finish": "stop",
+                    "summary": True,
+                })),
+            )
+            conn.execute(
+                "INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)",
+                ("prt_compact", "msg_compact", sid, 3000, 3000,
+                 json.dumps({"type": "text", "text": "Session summary so far."})),
+            )
+            conn.commit()
+            conn.close()
+
+            adapter = OpencodeAdapter()
+            data = load_opencode_session(str(db), sid)
+            _, stats = SessionSanitizer(_config("opencode"), adapter=adapter).process(data)
+            adapter.apply(data)
+            self.assertEqual(stats["fabricated"], 2)
+
+            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            for _mid, raw in self._fabricated_rows(conn, sid):
+                payload = json.loads(raw)
+                self.assertEqual(payload.get("agent"), "build", "not copied from the compaction turn")
+                self.assertEqual(payload.get("mode"), "build")
+                self.assertFalse(payload.get("summary"))
+            conn.close()
+
+    def test_fabricated_turn_is_complete_without_a_reference_reply(self):
+        """A session seeded before its first reply has no real turn to copy.
+
+        The adapter then falls back to its own shape, and that fallback has to
+        be just as complete — the crash this guards against is caused by the
+        *absence* of the token block, not by anything specific to a session
+        that happens to be empty when it is cleaned.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "opencode.db"
+            sid = self._fixture_db(db)
+            adapter = OpencodeAdapter()
+            config = _config("opencode")
+
+            data = load_opencode_session(str(db), sid)
+            _, stats = SessionSanitizer(config, adapter=adapter).process(data)
+            applied = adapter.apply(data)
+
+            self.assertEqual(stats["fabricated"], 2)
+            self.assertEqual(applied["messages_inserted"], 2)
+
+            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            rows = self._fabricated_rows(conn, sid)
+            self.assertEqual(len(rows), 2)
+            for _mid, raw in rows:
+                payload = json.loads(raw)
+                self.assertEqual(payload["role"], "assistant")
+                self.assertIsInstance(payload.get("tokens"), dict)
+                self.assertEqual(payload["tokens"]["output"], 0)
+                self.assertEqual(payload["tokens"]["cache"], {"write": 0, "read": 0})
+                self.assertEqual(payload["cost"], 0)
+                self.assertEqual(payload.get("finish"), "stop")
+                self.assertFalse(payload.get("summary"))
+            conn.close()
 
 
 class TestTerminalComplianceDedupe(unittest.TestCase):
