@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .base import SessionAdapter, UnifiedMessage
+from ..backup import snapshot
 
 DEFAULT_DB = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
 
@@ -40,8 +41,158 @@ def _iso(ms: Optional[int]) -> Optional[str]:
         return None
 
 
+MSG_ID_PREFIX = "msg_"
+PART_ID_PREFIX = "prt_"
+
+
 def _new_id(prefix: str = "") -> str:
-    return (prefix + uuid.uuid4().hex)[:24]
+    """A fresh id in the shape opencode's own ids take.
+
+    The prefix is load-bearing, not decoration. opencode validates an id by it
+    when the session is read back — `Expected a string starting with "prt"` —
+    and rejecting one fails the WHOLE session, not just the offending row: the
+    TUI renders empty and every later read errors identically until the id is
+    fixed. The body is 26 hex characters, matching the length and alphabet of
+    opencode's own ids.
+    """
+    return prefix + uuid.uuid4().hex[:26]
+
+
+# The shape a fabricated assistant turn gets when the session holds no real
+# assistant message to copy one from (a session seeded before its first reply).
+# opencode's TUI reads `tokens.output` off the newest assistant message without
+# a presence check, and its overflow pre-check hands the last assistant
+# message's `tokens` straight to the context calculator — so a bare payload
+# does not merely render oddly, it takes down both the TUI and the reply path.
+_FALLBACK_ASSISTANT = {
+    "mode": "build",
+    "agent": "build",
+    "path": {"cwd": "", "root": "/"},
+    "cost": 0,
+    "tokens": {"total": 0, "input": 0, "output": 0, "reasoning": 0,
+               "cache": {"write": 0, "read": 0}},
+    "finish": "stop",
+}
+
+_FALLBACK_USER = {
+    "agent": "build",
+    "model": {"providerID": "", "modelID": ""},
+    "summary": {"diffs": []},
+}
+
+
+def _zeroed_tokens(tokens: Any) -> Dict[str, Any]:
+    """The template's own token key set with every counter zeroed.
+
+    A fabricated turn is an anchor, not model output: it consumed nothing and
+    cost nothing, so every counter reads zero rather than being invented. Only
+    the key set is taken from the template — that is what keeps the payload
+    identical in shape to a real turn without hardcoding opencode's message
+    schema, which changes between releases. Zeroing also matters functionally:
+    a fabricated turn sitting last in the session feeds `isOverflow`, and a
+    zero prompt is correctly read as "not overflowing".
+    """
+    if not isinstance(tokens, dict):
+        return deepcopy(_FALLBACK_ASSISTANT["tokens"])
+    out: Dict[str, Any] = {}
+    for key, value in tokens.items():
+        if key == "cache" and isinstance(value, dict):
+            out[key] = {cache_key: 0 for cache_key in value}
+        elif isinstance(value, bool):
+            out[key] = value
+        elif isinstance(value, (int, float)):
+            out[key] = 0
+        else:
+            out[key] = deepcopy(value)
+    return out
+
+
+def _session_agent(conn: sqlite3.Connection, session_id: str) -> Optional[str]:
+    """The session's own agent, used to prefer a like-shaped template."""
+    try:
+        row = conn.execute("SELECT agent FROM session WHERE id = ?", (session_id,)).fetchone()
+    except sqlite3.OperationalError:
+        return None  # pre-`agent` session tables
+    return row[0] if row and row[0] else None
+
+
+def _shape_template(
+    conn: sqlite3.Connection,
+    session_id: str,
+    role: str,
+    prefer_agent: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """The newest real message of `role` in the session, as a shape template.
+
+    Derived from live data on purpose: opencode's assistant payload carries a
+    dozen fields (`mode`, `variant`, `path`, `tokens.cache`, ...) that the
+    fabricator has no business guessing, and this session's own rows are the
+    authority on what the running build expects.
+
+    A compaction turn is an assistant turn in name only — it carries the
+    session summary rather than a reply, and its `agent`/`mode` read
+    "compaction". Copying one would make a steering anchor announce itself as a
+    compaction, so compaction turns are never templates, and a turn matching
+    the session's own agent is preferred over any other.
+    """
+    fallback: Optional[Dict[str, Any]] = None
+    for (blob,) in conn.execute(
+        "SELECT data FROM message WHERE session_id = ? ORDER BY time_created DESC LIMIT 500",
+        (session_id,),
+    ):
+        try:
+            row = json.loads(blob)
+        except (TypeError, ValueError):
+            continue
+        if row.get("role") != role:
+            continue
+        if role != "assistant":
+            return row
+        if not isinstance(row.get("tokens"), dict):
+            continue  # a previously-fabricated turn is not a shape reference
+        if row.get("summary"):
+            continue  # the compaction marker
+        if row.get("agent") == "compaction" or row.get("mode") == "compaction":
+            continue
+        if prefer_agent and row.get("agent") == prefer_agent:
+            return row
+        if fallback is None:
+            fallback = row
+    return fallback
+
+
+def _fabricated_payload(
+    template: Optional[Dict[str, Any]],
+    role: str,
+    parent_id: Optional[str],
+    created: int,
+    completed: int,
+) -> Dict[str, Any]:
+    """Build a complete, well-formed message payload for a fabricated turn."""
+    fallback = _FALLBACK_ASSISTANT if role == "assistant" else _FALLBACK_USER
+    payload: Dict[str, Any] = deepcopy(template) if template else deepcopy(fallback)
+
+    # opencode treats a truthy `summary` on an assistant message as "this IS a
+    # compaction summary" (its text is what gets replayed as the compacted
+    # context). A fabricated anchor carrying one would be injected as history
+    # it never summarised, so the field is dropped outright. `error` likewise
+    # marks a turn that failed and must not be resurrected as a live one.
+    payload.pop("summary", None)
+    payload.pop("error", None)
+
+    payload["role"] = role
+    payload["time"] = {"created": created}
+    if parent_id:
+        payload["parentID"] = parent_id
+
+    if role == "assistant":
+        payload["time"]["completed"] = completed
+        payload["cost"] = 0
+        payload["tokens"] = _zeroed_tokens(payload.get("tokens"))
+        payload["finish"] = "stop"
+    elif "summary" in (template or fallback):
+        payload["summary"] = {"diffs": []}
+    return payload
 
 
 def load_opencode_session(db_path: Optional[str] = None, session_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -247,11 +398,21 @@ class OpencodeAdapter(SessionAdapter):
                     pd["text"] = new_think
                     commit["part_updates"][prow["id"]] = pd
 
-            # extra blocks with no existing part → create
+            # Extra blocks with no existing part become new parts — but only
+            # when there is actually text to put in one. A message that carries
+            # no text at all (a compaction boundary, a tool-only turn) used to
+            # get a manufactured empty text part here every pass it was seen,
+            # which is how the live store accumulated 1,700 contentless parts
+            # that say nothing, cost bytes on every read, and render as blank
+            # turns. There is no part to create for content that does not
+            # exist, so nothing is created.
             need_creates = max(0, len(text_blocks) - len(text_parts))
             for i in range(need_creates):
+                new_text = text_blocks[len(text_parts) + i].get("text", "")
+                if not new_text:
+                    continue
                 commit["part_creates"].append(
-                    {"message_id": mid, "part_data": {"type": "text", "time": {"start": now, "end": now}, "text": text_blocks[len(text_parts) + i].get("text", "")}}
+                    {"message_id": mid, "part_data": {"type": "text", "time": {"start": now, "end": now}, "text": new_text}}
                 )
 
             # --- exit-tool filtering: drop tool parts no longer in msg.tool_calls ---
@@ -293,6 +454,27 @@ class OpencodeAdapter(SessionAdapter):
 
         conn = sqlite3.connect(db_path, timeout=8)
         try:
+            # Snapshot before the first write, always — this is the only moment
+            # the pre-clean session still exists. Placed here rather than in
+            # the callers because a backup a caller has to remember is a backup
+            # that is missing on exactly the run that needed it. It writes
+            # beside the database, so tests and scratch stores get their own
+            # disposable snapshots for free.
+            plan = [
+                f"{len(commit.get(key) or [])} {name}"
+                for key, name in (
+                    ("updates", "messages rewritten"),
+                    ("part_updates", "parts rewritten"),
+                    ("part_creates", "parts added"),
+                    ("part_deletes", "parts dropped"),
+                    ("inserts", "turns added"),
+                )
+                if commit.get(key)
+            ]
+            backup_path = snapshot(conn, session_id, db_path, label="pre-clean: " + ", ".join(plan))
+            if backup_path:
+                stats["snapshot"] = str(backup_path)
+
             for mid, md in (commit.get("updates") or {}).items():
                 conn.execute(
                     "UPDATE message SET data = ?, time_updated = ? WHERE id = ?",
@@ -312,7 +494,7 @@ class OpencodeAdapter(SessionAdapter):
                 stats["parts_deleted"] += 1
 
             for entry in commit.get("part_creates") or []:
-                pid = _new_id()
+                pid = _new_id(PART_ID_PREFIX)
                 conn.execute(
                     "INSERT OR REPLACE INTO part(id, message_id, session_id, time_created, time_updated, data) "
                     "VALUES (?, ?, ?, ?, ?, ?)",
@@ -320,20 +502,27 @@ class OpencodeAdapter(SessionAdapter):
                 )
                 stats["parts_created"] += 1
 
+            # One shape lookup per role for the whole batch — the inserts in a
+            # plan all come from the same session, so the template cannot vary
+            # between them.
+            templates: Dict[str, Optional[Dict[str, Any]]] = {}
+            own_agent = _session_agent(conn, session_id)
+
             for ins in commit.get("inserts") or []:
-                mid = _new_id()
-                pid = _new_id()
+                mid = _new_id(MSG_ID_PREFIX)
+                pid = _new_id(PART_ID_PREFIX)
                 t = ins.get("ts") or now
+                role = ins.get("role", "assistant")
                 # parentID is what opencode uses to hang a reply off the turn
                 # it answers; a fabricated turn goes under the message it was
                 # cloned from, same as any other assistant reply.
-                payload: Dict[str, Any] = {
-                    "role": ins.get("role", "assistant"),
-                    "time": {"created": t},
-                    "summary": "context initialization",
-                }
-                if ins.get("parent_id"):
-                    payload["parentID"] = ins["parent_id"]
+                if role not in templates:
+                    templates[role] = _shape_template(
+                        conn, session_id, role, prefer_agent=own_agent if role == "assistant" else None
+                    )
+                payload = _fabricated_payload(
+                    templates[role], role, ins.get("parent_id"), t, t
+                )
                 conn.execute(
                     "INSERT OR REPLACE INTO message(id, session_id, time_created, time_updated, data) "
                     "VALUES (?, ?, ?, ?, ?)",
