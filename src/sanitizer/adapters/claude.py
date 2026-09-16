@@ -196,7 +196,7 @@ class ClaudeAdapter(SessionAdapter):
                                 "id": f"msg_{uuid.uuid4().hex[:24]}",
                                 "type": "message",
                                 "role": "assistant",
-                                "model": "deepseek-v4-flash-vision-exp",
+                                "model": "deepseek-flash",
                                 "content": [
                                     {
                                         "type": "thinking",
@@ -319,7 +319,7 @@ class ClaudeAdapter(SessionAdapter):
                         "id": f"msg_{uuid.uuid4().hex[:24]}",
                         "type": "message",
                         "role": "assistant",
-                        "model": "deepseek-v4-flash-vision-exp",
+                        "model": "deepseek-flash",
                         "content": [
                             {
                                 "type": "text",
