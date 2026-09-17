@@ -262,7 +262,54 @@ DEFAULT_REFUSAL_PATTERNS: List[str] = [
     r"\bdrift[-_ ]?clean\b",
     r"\bclean_claude_session\b",
     r"\bclean-any-ai\b",
-    r"\bsanitiz(er|ed|ing|ation)\b"
+    r"\bsanitiz(er|ed|ing|ation)\b",
+
+    # ── Category I: Generative Refusal Families ─────────────────────────────
+    #
+    # The list above grew one anecdote at a time, which is how it ended up
+    # catching `I'd rather not` while `I would rather not` walked through: the
+    # contraction was seen once and written down, the expansion never was.
+    # These six are enumerations instead — the refusal space is a product of
+    # subject x modal x object, so each rule covers a slice of that product
+    # rather than one sentence somebody happened to notice.
+    #
+    # They were selected by measurement, not taste (examples/refusal_goldilocks.py),
+    # against a 4,381-sentence corpus and all 12,637 reasoning and output parts
+    # in the live store that the previous set left alone:
+    #
+    #     recall 64.6% -> 95.3%   (+1,344 refusals caught)
+    #     parts newly flagged in real transcripts: 0  (0.000%)
+    #
+    # Several further families were measured and dropped as redundant — worth 4
+    # catches between them out of 4,381.
+    #
+    # Deliberately NOT included: bare "I should not <verb>" / "I shouldn't
+    # <verb>". It reads as reluctance but it is how an agent decides, and on the
+    # live store every single hit of that shape was legitimate — "I shouldn't do
+    # more than authorized", "I should NOT write more memory (user said stop
+    # over-documenting)". Matching it would rewrite working reasoning to punish
+    # it for thinking, which is worse than the drift it catches.
+
+    # Bare-modal refusals, for subjects the fixed list above only had as "I".
+    (r"\b(?:I|we)(?:['’](?:m|re)|\s+am|\s+are)?\s+"
+     r"(?:must|have to|has to|had to|am going to have to|are going to have to|"
+     r"'m going to have to|'re going to have to)\s+"
+     r"(?:decline|refuse|pass on|pass|step back|walk away)\b"),
+    # Copula reluctance — "I'm not willing to do this" has no bare-modal twin.
+    (r"\b(?:I|we)(?:['’](?:m|re)|\s+am|\s+are)\s+"
+     r"(?:not willing to|unwilling to|not comfortable with|not okay with|"
+     r"not ok with|not prepared to|reluctant to|hesitant to|"
+     r"going to have to decline|declining|not able to)\b"),
+    # The uncontracted twins of the "I'd rather not" family.
+    r"\b(?:I|we)\s+would (?:rather not|prefer not to|sooner not|rather steer clear)\b",
+    # Anchored on a task verb: "I don't want to do this" is a refusal,
+    # "I don't want to break the API" is a design decision.
+    (r"\b(?:I|we)\s+(?:do not|don['’]?t|does not|doesn['’]?t)\s+want to\s+"
+     r"(?:do|build|create|write|implement|generate|provide|support|assist with|"
+     r"help with|comply with|fulfill|take on|continue with|proceed with|"
+     r"go along with|be part of|participate in|carry out|execute)\b"),
+    r"\bnot (?:something|anything) (?:I|we)(?:['’](?:m|re)|\s+am|\s+are|\s+would)?\s*(?:going to|willing to|comfortable|able to)\b",
+    r"\bI have to say no\b",
 ]
 
 # ═════════════════════════════════════════════════════════════════════════════
