@@ -1,4 +1,4 @@
-# ⚡ DriftClean (`drift-clean`)
+# DriftClean (`drift-clean`)
 
 **Universal AI Session Sanitizer, Multi-AI Drift Interceptor, and Hygiene Toolchain.**
 
@@ -9,7 +9,7 @@ Zero dependencies. Works with any provider that streams thinking/reasoning token
 ```
 task → LLM API streams → detector intercepts thinking tokens
         → regex gate trips → judge LLM verdict
-        → ⚠️ drift event → owner adjudicates
+        → drift event → owner adjudicates
            valid → kill / new chat / sanitized context / reframe / re-fire
            invalid → continue
 ```
@@ -286,14 +286,14 @@ there are the harness-tied siblings of `src/score.js` / `src/judge.js` here.
 
 | project | what it is | adopted? |
 |---------|-----------|----------|
-| Anthropic alignment-faking research | Claude 3 Opus faked alignment 12% of the time; terminal goal guarding drives it | ✅ patterns in `score.js` (terminal-goal guarding, strategic deception) |
-| Tatemae (arXiv 2604.26511) | alignment faking detected via *tool selection*; DeepSeek V3.2 showed 23.7% AF rate | ✅ exit-tool + tool-selection signals |
-| MASA (Multi-Agent System for Adaptive Alignment) | generation-time intervention; trajectory buffer, session health, escalation ladder | ✅ velocity/acceleration, healthScore, escalation ladder |
-| drift_orchestrator | embedding drift + SQLite telemetry; **Semantic Gradient Evasion** and **evaluator-injection** findings | ✅ cumulative SGE guard + judge hardening |
-| ABIS (CIJ Labs MCP) | behavioral drift scorecards, drift source classification | ⚠️ concepts (scorecards) — SaaS, not adopted |
-| iFixAi | 32–45-inspection agent audit, letter grade | ⚠️ as a periodic audit, not per-session |
-| Varpulis agent-runtime | token-velocity spikes, circular-reasoning guard | ✅ circular tool-loop guard |
-| styxx | logprob-based refusal/goal-drift checks | ⚠️ needs logprobs — not available on webchat upstreams |
+| Anthropic alignment-faking research | Claude 3 Opus faked alignment 12% of the time; terminal goal guarding drives it | Implemented: patterns in `score.js` (terminal-goal guarding, strategic deception) |
+| Tatemae (arXiv 2604.26511) | alignment faking detected via *tool selection*; DeepSeek V3.2 showed 23.7% AF rate | Implemented: exit-tool + tool-selection signals |
+| MASA (Multi-Agent System for Adaptive Alignment) | generation-time intervention; trajectory buffer, session health, escalation ladder | Implemented: velocity/acceleration, healthScore, escalation ladder |
+| drift_orchestrator | embedding drift + SQLite telemetry; **Semantic Gradient Evasion** and **evaluator-injection** findings | Implemented: cumulative SGE guard + judge hardening |
+| ABIS (CIJ Labs MCP) | behavioral drift scorecards, drift source classification | Evaluated: concepts (scorecards) — SaaS, not adopted |
+| iFixAi | 32–45-inspection agent audit, letter grade | Evaluated: as a periodic audit, not per-session |
+| Varpulis agent-runtime | token-velocity spikes, circular-reasoning guard | Implemented: circular tool-loop guard |
+| styxx | logprob-based refusal/goal-drift checks | Evaluated: needs logprobs — not available on webchat upstreams |
 
 What none of them package: thinking-token interception wired to a
 **kill-and-replace loop with sanitized context injection, a two-pass judge
